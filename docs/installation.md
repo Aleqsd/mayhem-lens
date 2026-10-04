@@ -80,6 +80,8 @@ Ouvrir **Réglages** depuis l'icône système. La fenêtre apparaît uniquement 
 
 **Enregistrer** valide et applique les préférences ; **Annuler** ou Échap ne les enregistrent pas. Les valeurs par défaut restent un brouillon jusqu'à l'enregistrement. La saisie du stade prime sur l'automatique ; sans ordinal explicite reconnu dans l'en-tête, le mode automatique garde le tier champion et affiche que le choix est inconnu. Une lecture approchée exige deux observations stables au-dessus du seuil ; en dessous, les badges indiquent une lecture incertaine sans tier ni build, avec le raccourci de relecture configuré.
 
+Une langue OCR manquante laisse le menu et les réglages accessibles. Le panneau indique son indisponibilité ; sélectionner une autre langue installée, ou installer la fonctionnalité OCR souhaitée dans Windows. La reconnaissance reste indisponible tant que cette condition n'est pas corrigée.
+
 L'exécutable x64 lie le runtime C statiquement pour éviter une installation séparée de Visual C++ Redistributable. Les commandes d'un exécutable GUI lancées directement depuis PowerShell peuvent nécessiter `| Out-String` pour capturer leur sortie et attendre leur fin.
 
 Le patch de données est celui du manifeste fournisseur ; sa compatibilité avec le catalogue est vérifiée. L'API LiveClientData observée ne fournit pas la version du client : ce prototype n'établit pas encore une égalité entre cette version et le patch du fournisseur.

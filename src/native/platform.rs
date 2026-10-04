@@ -213,7 +213,7 @@ pub fn diagnostics() -> Result<String> {
 
 /// Read-only preflight. Does not create a window, device, capture session or OCR
 /// engine. The engine is initialized only on its long-lived capture worker.
-pub fn ensure_ready(language: &str) -> Result<()> {
+pub fn ensure_environment_ready() -> Result<()> {
     ensure!(
         package_identity(),
         "Windows OCR exige une identité de package. Installer le MSIX puis lancer l'application enregistrée ; l'EXE nu n'est pas une voie supportée."
@@ -223,6 +223,12 @@ pub fn ensure_ready(language: &str) -> Result<()> {
         GraphicsCaptureSession::IsSupported()?,
         "Windows Graphics Capture indisponible"
     );
+    Ok(())
+}
+
+pub fn ensure_ready(language: &str) -> Result<()> {
+    ensure_environment_ready()?;
+    let _apartment = Apartment::new()?;
     let requested = requested_languages(language)?;
     let mut available = false;
     for tag in requested {

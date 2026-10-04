@@ -252,16 +252,20 @@ fn safe_scan_error(error: &anyhow::Error) -> ScanError {
 }
 
 pub fn run(cache: PathBuf, config_path: PathBuf) -> Result<()> {
-    // Require package/OCR support before starting the game workers.
+    // Require the capture platform. A missing OCR language must leave the tray
+    // and preferences available so the user can select an installed language.
     if !config_path.exists() {
         Config::default().save(&config_path)?;
     }
     let _instance = native::acquire_single_instance()?;
     let updates = crate::update::UpdateController::start()?;
-    native::ensure_ready(&Config::load(&config_path)?.language)?;
+    native::ensure_environment_ready()?;
     let stop = Arc::new(AtomicBool::new(false));
     let session: Arc<RwLock<Option<Arc<Session>>>> = Arc::new(RwLock::new(None));
     let status = Arc::new(Mutex::new(String::new()));
+    if let Err(error) = native::ensure_ready(&Config::load(&config_path)?.language) {
+        write_status(&status, "ocr-unavailable", &error.to_string());
+    }
     let (badges_tx, badges_rx) = mpsc::channel();
     let (actions_tx, actions_rx) = mpsc::channel();
     let data_stop = Arc::clone(&stop);

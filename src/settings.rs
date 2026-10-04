@@ -237,6 +237,11 @@ mod window {
             window.layout()?;
             window.show_page(0);
             window.update_status()?;
+            if crate::native::ensure_ready(&config.language).is_err() {
+                window.show_error(choose(english,
+                    "OCR indisponible : choisir une autre langue ou installer sa fonctionnalité OCR dans Windows.",
+                    "OCR unavailable: choose another language or install its Windows OCR feature."));
+            }
             unsafe {
                 ensure!(
                     SetTimer(Some(hwnd), 1, 500, None) != 0,

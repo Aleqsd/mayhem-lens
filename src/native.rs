@@ -61,9 +61,9 @@ mod platform;
 
 #[cfg(windows)]
 pub use platform::{
-    InstanceGuard, acquire_single_instance, calibrate_offers, diagnostics, ensure_ready,
-    game_window_visible, invalidate_observations, observe_game, package_data_directory,
-    reading_is_current, reset_calibration,
+    InstanceGuard, acquire_single_instance, calibrate_offers, diagnostics,
+    ensure_environment_ready, ensure_ready, game_window_visible, invalidate_observations,
+    observe_game, package_data_directory, reading_is_current, reset_calibration,
 };
 
 #[cfg(windows)]
