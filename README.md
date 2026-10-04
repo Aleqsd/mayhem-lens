@@ -2,7 +2,7 @@
 
 Overlay Windows léger pour afficher les tiers des augmentations de **League of Legends — ARAM Mayhem**, en fonction du champion joué.
 
-**État : version expérimentale 1.1.0.** Cache Mayhem, reconnaissance locale FR/EN, classement, conseils d'objets, overlay natif et mises à jour sont implémentés. Cette version ajoute le calibrage adaptatif, les indications de confiance, la lecture d'un stade explicite, une fenêtre de réglages et le suivi des mises à jour. La compilation et les tests métier sont séparés de la validation en jeu : focus, rendu, précision OCR, performances et application effective des mises à jour restent à vérifier sur Windows, avec l'utilisateur disponible. Le numéro de version ne signifie pas que ces validations sont achevées.
+**État : version expérimentale 1.1.1.** Cache Mayhem, reconnaissance locale FR/EN, classement, conseils d'objets, overlay natif et mises à jour sont implémentés. L'installateur natif contient le MSIX et son certificat public ; calibrage adaptatif, indications de confiance, stade explicite et réglages restent disponibles. La compilation et les tests métier sont séparés de la validation réelle de l'installation et du jeu : focus, rendu, précision OCR, performances et application effective des mises à jour restent à vérifier sur Windows, avec l'utilisateur disponible. Le numéro de version ne signifie pas que ces validations sont achevées.
 
 ## Objectif
 
@@ -43,17 +43,21 @@ Rust + bindings Microsoft `windows`, petites fenêtres Win32 transparentes, Dire
 cargo fmt --check
 cargo check --locked
 cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked
+cargo test --locked --all-targets
 ./scripts/package.ps1
 ```
 
 `package.ps1` produit un MSIX **non signé** dans `dist/`, avec validation MakeAppx, images propres et licences des dépendances. La cible est Windows 11 22H2 ou plus récent. Il ne l'installe pas, n'approuve aucun certificat et ne démarre pas l'overlay. Voir [l'installation](docs/installation.md) pour la signature et la mise en service ultérieure.
 
-La CI Windows exécute ces contrôles et conserve le MSIX non signé comme artefact. La clé de développement reste hors Git et hors du package.
+`scripts/package-setup.ps1 -PublicCertificatePath <certificat.cer>` intègre ensuite le MSIX et son certificat public dans l'installateur versionné. Pour une release, signer d'abord le MSIX, puis le Setup. Le script compile et copie les fichiers sans installer ni ouvrir de fenêtre.
+
+La CI Windows exécute ces contrôles et conserve le MSIX et le Setup non signés comme artefacts `UNSIGNED`. Elle utilise un certificat public de test créé en mémoire, sans approuver de certificat. La clé de développement reste hors Git et hors du package.
 
 Après installation signée, ouvrir **Mayhem Lens** depuis Windows, ou utiliser l'alias `mayhem-lens.exe run`. Il attend une partie Mayhem ; l'icône système donne accès à la relecture, au stade, aux réglages et à l'arrêt.
 
-Pour installer la [dernière version](https://github.com/Aleqsd/mayhem-lens/releases/latest), télécharger le certificat public et le MSIX signé. Approuver le certificat de développement dans `LocalMachine\TrustedPeople`, puis ouvrir le MSIX et installer Mayhem Lens. Ce parcours demande des droits administrateur pour le certificat et ne nécessite aucune association App Installer. Une version préparée par l'application doit prendre effet après fermeture et relance ; sa version active reste à vérifier.
+Pour installer la [dernière version](https://github.com/Aleqsd/mayhem-lens/releases/latest), télécharger `MayhemLens-Setup-1.1.1.exe`. L'interface native sombre demande un consentement explicite pour le certificat de développement ; son helper demande UAC seulement si cette confiance doit être ajoutée. Le package est installé pour l'utilisateur courant, puis **Lancer Mayhem Lens** ouvre l'application uniquement sur clic. Les écrans de sécurité Windows restent standards. Le [MSIX manuel](docs/installation.md#installation-manuelle-du-msix) reste disponible ; aucune association App Installer n'est requise.
+
+L'installateur signale une langue OCR manquante et n'ajoute pas silencieusement de fonctionnalités Windows. Le certificat est auto-signé et la distribution expérimentale. Une mise à jour préparée par l'application doit prendre effet après fermeture et relance ; sa version active reste à vérifier.
 
 | Action | Raccourci |
 | --- | --- |

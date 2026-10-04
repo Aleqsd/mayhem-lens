@@ -17,10 +17,38 @@ jobs:
       - run: cargo fmt --check
       - run: cargo check --locked
       - run: cargo clippy --locked --all-targets -- -D warnings
-      - run: cargo test --locked
+      - run: cargo test --locked --all-targets
       - run: ./scripts/package.ps1
         shell: pwsh
+      - name: Build unsigned installer with an ephemeral public test certificate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          [xml]$manifest = Get-Content packaging/AppxManifest.xml -Raw
+          $rsa = [Security.Cryptography.RSA]::Create(2048)
+          $certificate = $null
+          try {
+            $request = [Security.Cryptography.X509Certificates.CertificateRequest]::new(
+              [string]$manifest.Package.Identity.Publisher, $rsa,
+              [Security.Cryptography.HashAlgorithmName]::SHA256,
+              [Security.Cryptography.RSASignaturePadding]::Pkcs1)
+            $request.CertificateExtensions.Add(
+              [Security.Cryptography.X509Certificates.X509KeyUsageExtension]::new(
+                [Security.Cryptography.X509Certificates.X509KeyUsageFlags]::DigitalSignature, $true))
+            $certificate = $request.CreateSelfSigned([DateTimeOffset]::UtcNow.AddMinutes(-5), [DateTimeOffset]::UtcNow.AddDays(1))
+            $certificatePath = Join-Path $env:RUNNER_TEMP 'MayhemLens-CI-public-only.cer'
+            [IO.File]::WriteAllBytes($certificatePath,
+              $certificate.Export([Security.Cryptography.X509Certificates.X509ContentType]::Cert))
+            ./scripts/package-setup.ps1 -PublicCertificatePath $certificatePath
+          } finally {
+            if ($certificate) { $certificate.Dispose() }
+            $rsa.Dispose()
+          }
       - uses: actions/upload-artifact@v4
         with:
           name: MayhemLens-Windows-unsigned
           path: dist/*.msix
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MayhemLens-Setup-UNSIGNED-CI-only
+          path: dist/MayhemLens-Setup-*.exe

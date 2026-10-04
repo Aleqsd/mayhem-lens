@@ -1,6 +1,6 @@
 # Mises à jour de Mayhem Lens
 
-La version expérimentale 1.1.0 consulte les releases GitHub au lancement et depuis le menu de l'icône système. Une version supérieure est téléchargée sous forme de MSIX local, contrôlée, puis confiée au gestionnaire de packages Windows. L'inscription est différée pendant que Mayhem Lens est utilisé ; la nouvelle version doit prendre effet au prochain lancement.
+La version expérimentale 1.1.1 consulte les releases GitHub au lancement et depuis le menu de l'icône système. Une version supérieure est téléchargée sous forme de MSIX local, contrôlée, puis confiée au gestionnaire de packages Windows. L'inscription est différée pendant que Mayhem Lens est utilisé ; la nouvelle version doit prendre effet au prochain lancement. L'installateur personnalisé sert à la première installation ; le canal de mise à jour continue d'utiliser le MSIX signé.
 
 La confiance du certificat, l'installation depuis la release et l'application effective d'une mise à jour sur un PC restent à valider. La compilation, les tests unitaires et la création d'un MSIX ne constituent pas cette preuve.
 

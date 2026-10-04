@@ -1,6 +1,6 @@
 # Plan de validation
 
-## État du prototype 1.1.0
+## État du prototype 1.1.1
 
 Le code complet doit passer formatage, compilation, Clippy et tests sans lancer une fenêtre. Les tests métier utilisent des fixtures synthétiques. La validation locale du 4 octobre a également téléchargé les données Mayhem réelles de Jinx, Brand et Tahm Kench, vérifié la réutilisation du cache et lu les recommandations FR/EN avec un proxy HTTP invalide : la lecture depuis le cache ne dépend pas du fournisseur. Les 446 noms du catalogue FR/EN et leurs 446 variantes avec retour à la ligne sont associés au bon ID dans un test local sans capture.
 
@@ -25,6 +25,18 @@ Tester les noms exacts, approchés et insuffisants : un changement de cartes rem
 Tester la migration du JSON 1.0.1, les nombres invalides/NaN, les raccourcis équivalents en doublon et la sauvegarde de préférences pendant des changements de session. Les choix enregistrés et règles personnelles doivent être préservés ; un stade non édité ne doit pas rétablir un override devenu ancien. Tab, Maj+Tab, Entrée, Échap, combobox, erreurs de validation, page de mises à jour, DPI et rendu des textes restent à tester dans une vraie fenêtre avec l'utilisateur disponible.
 
 La progression de téléchargement doit rester monotone et bornée. Une corruption ne doit jamais produire un état prêt. Un reçu accepté est conservé ; une confirmation exige la version active exacte et doit rester visible hors ligne, y compris si l'enregistrement de la date de confirmation échoue. Ces tests ne préparent aucune mise à jour Windows.
+
+## Installateur 1.1.1 : contrôles distincts
+
+La compilation et les tests du binaire `mayhem-lens-setup` ne lancent pas son interface. Les résultats finaux de cette version doivent être consignés après le pipeline complet ; le décompte de 69 tests ci-dessus décrit la version 1.1.0.
+
+Les contrôles locaux de la version 1.1.1 passent le formatage, la compilation sur toutes les cibles, Clippy avec avertissements bloquants et **74 tests** (aucun échec, un test historique de fixture MSIX ignoré). Les nouveaux tests couvrent les pins de payload, les limites de plateforme, le refus de rétrogradation, la preuve d'inscription exacte et le signal OCR non bloquant. L'aperçu de l'installateur utilise son renderer GDI dans un bitmap mémoire, sans créer de fenêtre ni capturer l'écran ; cette vérification visuelle ne valide pas les interactions natives.
+
+Vérifier sans installation que le Setup intègre le MSIX de la bonne identité/version/x64 et le certificat public seul, avec les SHA-256 attendus. Le script doit refuser un manifeste incohérent, une clé/PFX, un certificat différent du Publisher, un payload trop volumineux et une compilation échouée. Vérifier la restauration des variables d'environnement, y compris après une erreur. La CI utilise une clé éphémère en mémoire, exporte uniquement son certificat public et conserve des artefacts explicitement **UNSIGNED** ; elle ne modifie aucun magasin de confiance.
+
+Sur une installation réelle, avec l'utilisateur disponible, vérifier l'interface sombre, le clavier et le DPI, le consentement explicite, l'annulation et le refus UAC, ainsi que l'absence de nouvelle demande d'élévation lorsque le certificat est déjà approuvé. Seul le helper de confiance doit être élevé ; le package doit appartenir à l'utilisateur initial. Vérifier ensuite l'installation signée, les erreurs de signature et le lancement exclusivement par le bouton ou le menu Démarrer. Une langue OCR manquante doit produire un avertissement, sans installation silencieuse de fonctionnalités Windows. Vérifier enfin le parcours manuel du MSIX et la conservation des réglages lors d'une mise à jour.
+
+Les contrôles de packaging et la signature des fichiers ne prouvent pas que Windows acceptera le certificat ni que l'interface, l'installation et le lancement fonctionnent sur un autre PC. Ces validations restent en attente.
 
 ## Mises à jour
 
