@@ -1,12 +1,12 @@
 # Architecture proposée
 
-Statut : proposition issue de la recherche, à confirmer après cadrage et prototype.
+Statut : première implémentation expérimentale. La validation graphique et les mesures en partie restent à faire.
 
 ## Socle
 
 Rust est retenu comme point de départ pour son contrôle des ressources et ses [bindings Microsoft Windows](https://github.com/microsoft/windows-rs). Le choix ne suppose aucune supériorité mesurée sur un programme C++ équivalent.
 
-Un seul processus coordonnerait une boucle de messages Windows et des tâches de données, capture et reconnaissance hors du thread d'affichage. Le runtime, les dépendances et les threads réellement nécessaires seront choisis lors de l'implémentation.
+Un seul processus coordonne une boucle de messages Windows, un worker de données/API locale et un worker capture/OCR. Le snapshot et le catalogue préparé passent en mémoire par session ; le worker de reconnaissance n'effectue aucun appel réseau. L'affichage ne se redessine que lorsque ses badges changent. Le polling automatique initial est de 900 ms, configurable entre 400 et 5000 ms ; il ne constitue pas une mesure de latence.
 
 ## Responsabilités
 
@@ -38,7 +38,7 @@ Piste : `Windows.Graphics.Capture` avec [CreateForWindow](https://learn.microsof
 
 Une détection légère surveille l'apparition ou le changement des cartes. L'OCR n'est pas lancé sur chaque frame. Conserver le moteur chaud, éviter les travaux simultanés obsolètes et ne publier que le résultat correspondant aux dernières cartes détectées.
 
-Windows OCR et un moteur embarqué seront comparés sur les mêmes captures. [Windows.Media.Ocr](https://learn.microsoft.com/en-us/uwp/api/windows.media.ocr) exige officiellement une identité de package pour une application desktop ; les langues OCR installées doivent aussi être vérifiées. Un programme portable doit employer une autre voie supportée, par exemple un moteur OCR livré avec ses ressources.
+Le prototype utilise [Windows.Media.Ocr](https://learn.microsoft.com/en-us/uwp/api/windows.media.ocr), qui exige officiellement une identité de package pour une application desktop. Le packaging MSIX apporte cette identité ; la langue OCR demandée est vérifiée avant le démarrage. Aucun moteur embarqué de secours n'est livré dans cette version.
 
 ## Cache et erreurs
 

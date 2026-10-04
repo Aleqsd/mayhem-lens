@@ -1,8 +1,14 @@
 # Plan de validation
 
-## État initial
+## État du prototype 0.1.0
 
-Le squelette Rust doit passer formatage, compilation et Clippy. Cela prouve uniquement la validité du squelette, pas celle de l'overlay ni son fonctionnement dans LoL.
+Le code complet doit passer formatage, compilation, Clippy et tests sans lancer une fenêtre. Les tests métier utilisent des fixtures synthétiques. La validation locale du 4 octobre a également téléchargé les données Mayhem réelles de Jinx, vérifié la réutilisation du cache et lu les recommandations FR/EN avec un proxy HTTP invalide : la lecture depuis le cache ne dépend pas du fournisseur.
+
+Le mode `KIWI` a été observé dans l'API locale pendant une partie, par une requête en lecture seule. MakeAppx valide le manifeste et la construction du package. Une signature de développement prépare l'installation ; elle ne vaut pas installation ou confiance du certificat.
+
+Les 30 tests couvrent notamment la séparation des tiers global/champion/stade, le filtrage du pool KIWI, l'identité du joueur, les titres FR/EN ambigus, les doublons spatiaux, les règles personnelles et l'expiration de badges si l'OCR se bloque. Formatage, Clippy avec avertissements bloquants et compilation release passent localement. L'import PE vérifié utilise seulement des bibliothèques système Windows, avec le runtime C lié statiquement.
+
+Cette preuve n'inclut pas le rendu Windows, le passage des clics, le focus, la précision OCR ou les ressources consommées en partie. Ces validations attendent la disponibilité de l'utilisateur : aucun contrôle clavier/souris, lancement d'overlay ou installation pendant son jeu.
 
 ## Première preuve technique
 

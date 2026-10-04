@@ -1,0 +1,26 @@
+name: Windows
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo check --locked
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+      - run: ./scripts/package.ps1
+        shell: pwsh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MayhemLens-Windows-unsigned
+          path: dist/MayhemLens_0.1.0.0_x64.msix

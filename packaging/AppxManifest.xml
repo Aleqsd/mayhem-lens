@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+         xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+         xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows10/3"
+         xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
+         xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+         IgnorableNamespaces="uap uap3 desktop rescap">
+  <Identity Name="Aleqsd.MayhemLens" Publisher="CN=Alexandre DO-O ALMEIDA" Version="0.1.0.0" ProcessorArchitecture="x64" />
+  <Properties>
+    <DisplayName>Mayhem Lens</DisplayName>
+    <PublisherDisplayName>Alexandre</PublisherDisplayName>
+    <Description>Tiers et routes de builds ARAM Mayhem, calculés localement</Description>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19041.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+  <Resources><Resource Language="fr-fr" /><Resource Language="en-us" /></Resources>
+  <Applications>
+    <Application Id="Lens" Executable="mayhem-lens.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements DisplayName="Mayhem Lens" Description="Overlay personnel ARAM Mayhem"
+                          BackgroundColor="#121825" Square150x150Logo="Assets\Square150x150Logo.png"
+                          Square44x44Logo="Assets\Square44x44Logo.png" />
+      <Extensions>
+        <uap3:Extension Category="windows.appExecutionAlias" Executable="mayhem-lens.exe" EntryPoint="Windows.FullTrustApplication">
+          <uap3:AppExecutionAlias><desktop:ExecutionAlias Alias="mayhem-lens.exe" /></uap3:AppExecutionAlias>
+        </uap3:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+  <Capabilities>
+    <Capability Name="internetClient" />
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+</Package>
