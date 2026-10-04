@@ -15,6 +15,7 @@ Date de référence : 4 octobre 2026. Les dix réponses sont consignées dans `q
 - Installation Windows classique ; MSIX accepté.
 - Données du champion téléchargées au début de la partie, puis consultées depuis le cache.
 - Vérification des mises à jour au lancement et accès manuel simple depuis le menu système. Préparation native MSIX en arrière-plan, application après fermeture ; Windows 11 22H2 ou plus récent.
+- Améliorations demandées le 4 octobre : calibrage automatique, indication de confiance et masquage d'un tier incertain, détection du stade quand il est identifiable, fenêtre de réglages et suivi explicite des mises à jour jusqu'à confirmation après relance.
 
 ## Besoin exprimé
 

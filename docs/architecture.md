@@ -43,6 +43,10 @@ Le prototype utilise [Windows.Media.Ocr](https://learn.microsoft.com/en-us/uwp/a
 
 ## Cache et erreurs
 
+La région OCR est apprise en mémoire après deux groupes de titres cohérents, avec projection entre les dimensions WGC et les pixels physiques. Les offsets du recadrage font partie de la clé de réutilisation OCR. La géométrie associée aux badges est celle de la capture, conservée jusqu'au rendu : un déplacement ou resize intervenu avant réception interdit leur affichage.
+
+Le moteur distingue similarité exacte, nom approché stable et lecture incertaine. Le stade automatique exige un ordinal explicite dans l'en-tête et deux observations cohérentes du même groupe. Un marqueur absent ou contradictoire efface immédiatement ce stade ; aucun niveau ou compteur de confirmations n'est utilisé comme substitut.
+
 Clé de données minimale : source, patch, champion, augmentation ; stade optionnel. Inclure la date du dataset, la date d'import et la population annoncée.
 
 Les données du champion sont téléchargées au début de la partie, puis conservées en cache. Le réseau reste hors du parcours de choix. En cas d'échec, utiliser un cache compatible selon la politique retenue, ou indiquer l'indisponibilité. Un résultat absent ou incertain n'est jamais converti arbitrairement en mauvais tier.

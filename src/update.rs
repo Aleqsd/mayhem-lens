@@ -14,7 +14,7 @@ use std::{
         mpsc::{self, SyncSender},
     },
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 pub const RELEASES_URL: &str = "https://github.com/Aleqsd/mayhem-lens/releases/latest";
@@ -24,6 +24,8 @@ const PACKAGE_PUBLISHER: &str = "CN=Alexandre DO-O ALMEIDA";
 const MINIMUM_DEFERRED_BUILD: u32 = 22_621;
 const MAX_METADATA_SIZE: u64 = 1024 * 1024;
 const MAX_PACKAGE_SIZE: u64 = 128 * 1024 * 1024;
+const PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
+const MAX_RECEIPT_SIZE: u64 = 4096;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -31,9 +33,12 @@ pub enum UpdatePhase {
     Checking,
     UpToDate,
     Available,
+    Downloading,
+    Verifying,
     Preparing,
     ReadyOnRestart,
     Registered,
+    Updated,
     Unassociated,
     Unsupported,
     Error,
@@ -42,7 +47,22 @@ pub enum UpdatePhase {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UpdateStatus {
     pub phase: UpdatePhase,
+    /// Observed package identity; never substitute the offered target version.
     pub installed_version: Option<String>,
+    #[serde(default)]
+    pub active_version: Option<String>,
+    #[serde(default)]
+    pub target_version: Option<String>,
+    #[serde(default)]
+    pub downloaded_bytes: u64,
+    #[serde(default)]
+    pub total_bytes: Option<u64>,
+    #[serde(default)]
+    pub confirmed_version: Option<String>,
+    #[serde(default)]
+    pub confirmed_at_unix: Option<u64>,
+    #[serde(default)]
+    pub check_error: Option<String>,
     pub checked_at_unix: u64,
     pub detail: String,
 }
@@ -51,17 +71,27 @@ impl UpdateStatus {
     fn new(phase: UpdatePhase, version: Option<String>, detail: impl Into<String>) -> Self {
         Self {
             phase,
+            active_version: version.clone(),
             installed_version: version,
-            checked_at_unix: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
+            target_version: None,
+            downloaded_bytes: 0,
+            total_bytes: None,
+            confirmed_version: None,
+            confirmed_at_unix: None,
+            check_error: None,
+            checked_at_unix: unix_seconds(),
             detail: detail.into(),
         }
     }
 
     pub fn busy(&self) -> bool {
-        matches!(self.phase, UpdatePhase::Checking | UpdatePhase::Preparing)
+        matches!(
+            self.phase,
+            UpdatePhase::Checking
+                | UpdatePhase::Downloading
+                | UpdatePhase::Verifying
+                | UpdatePhase::Preparing
+        )
     }
 
     pub fn summary(&self, language: &str) -> &'static str {
@@ -72,12 +102,18 @@ impl UpdateStatus {
             (UpdatePhase::UpToDate, true) => "Application is up to date",
             (UpdatePhase::Available, false) => "Mise à jour disponible",
             (UpdatePhase::Available, true) => "Update available",
+            (UpdatePhase::Downloading, false) => "Téléchargement de la mise à jour…",
+            (UpdatePhase::Downloading, true) => "Downloading update…",
+            (UpdatePhase::Verifying, false) => "Vérification du package…",
+            (UpdatePhase::Verifying, true) => "Verifying package…",
             (UpdatePhase::Preparing, false) => "Préparation de la mise à jour…",
             (UpdatePhase::Preparing, true) => "Preparing update…",
             (UpdatePhase::ReadyOnRestart, false) => "Mise à jour préparée — prochain lancement",
             (UpdatePhase::ReadyOnRestart, true) => "Update prepared — next launch",
             (UpdatePhase::Registered, false) => "Mise à jour enregistrée — relancer l’overlay",
             (UpdatePhase::Registered, true) => "Update registered — relaunch the overlay",
+            (UpdatePhase::Updated, false) => "Mise à jour appliquée — version active confirmée",
+            (UpdatePhase::Updated, true) => "Update applied — active version confirmed",
             (UpdatePhase::Unassociated, false) => "Canal de mise à jour non associé",
             (UpdatePhase::Unassociated, true) => "Update channel is not associated",
             (UpdatePhase::Unsupported, false) => "Mise à jour différée : Windows 11 22H2 requis",
@@ -86,14 +122,110 @@ impl UpdateStatus {
             (UpdatePhase::Error, true) => "Update unavailable — retry",
         }
     }
+
+    /// Local presentation only: no network, filesystem or Windows API calls.
+    pub fn display_lines(&self, language: &str) -> Vec<String> {
+        let english = language == "en";
+        let mut lines = vec![self.summary(language).into()];
+        if let Some(version) = self
+            .active_version
+            .as_ref()
+            .or(self.installed_version.as_ref())
+        {
+            lines.push(format!(
+                "{} : {version}",
+                if english {
+                    "Active version"
+                } else {
+                    "Version active"
+                }
+            ));
+        }
+        if let Some(version) = &self.installed_version
+            && self
+                .active_version
+                .as_ref()
+                .is_some_and(|active| active != version)
+        {
+            lines.push(format!(
+                "{} : {version}",
+                if english {
+                    "Installed version"
+                } else {
+                    "Version installée"
+                }
+            ));
+        }
+        if let Some(version) = &self.target_version {
+            lines.push(format!(
+                "{} : {version}",
+                if english {
+                    "Target version"
+                } else {
+                    "Version cible"
+                }
+            ));
+        }
+        if let Some(total) = self.total_bytes.filter(|total| *total > 0) {
+            let downloaded = self.downloaded_bytes.min(total);
+            let percent = u128::from(downloaded) * 100 / u128::from(total);
+            lines.push(format!(
+                "{} : {:.1} / {:.1} {} ({percent} %)",
+                if english {
+                    "Download"
+                } else {
+                    "Téléchargement"
+                },
+                downloaded as f64 / 1_048_576.0,
+                total as f64 / 1_048_576.0,
+                if english { "MiB" } else { "Mio" }
+            ));
+        }
+        if let Some(version) = &self.confirmed_version {
+            lines.push(format!(
+                "{} : {version}",
+                if english {
+                    "Update applied at launch"
+                } else {
+                    "Mise à jour confirmée au lancement"
+                }
+            ));
+        }
+        if let Some(error) = &self.check_error {
+            lines.push(format!(
+                "{} : {error}",
+                if english {
+                    "Last check unavailable"
+                } else {
+                    "Dernière vérification indisponible"
+                }
+            ));
+        } else if self.phase == UpdatePhase::Error && !self.detail.is_empty() {
+            lines.push(self.detail.clone());
+        }
+        lines
+    }
+}
+
+fn unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 /// Clones share one bounded request queue and one state. Dropping the last
 /// controller disconnects the worker; shutdown never joins a network operation.
 #[derive(Clone)]
 pub struct UpdateController {
-    request: SyncSender<()>,
+    request: SyncSender<UpdateRequest>,
     state: Arc<Mutex<UpdateStatus>>,
+}
+
+#[derive(Clone, Copy)]
+enum UpdateRequest {
+    Check,
+    Prepare,
 }
 
 impl UpdateController {
@@ -110,9 +242,9 @@ impl UpdateController {
             .spawn(move || {
                 // This first request happens for every actual app launch, including
                 // an execution alias, with no App Installer association required.
-                run_request(&worker_state);
-                while requests.recv().is_ok() {
-                    run_request(&worker_state);
+                run_request(&worker_state, UpdateRequest::Prepare);
+                while let Ok(request) = requests.recv() {
+                    run_request(&worker_state, request);
                 }
             })
             .context("Création du worker de mise à jour")?;
@@ -120,7 +252,12 @@ impl UpdateController {
     }
 
     pub fn request_update(&self) -> bool {
-        !self.status().busy() && self.request.try_send(()).is_ok()
+        !self.status().busy() && self.request.try_send(UpdateRequest::Prepare).is_ok()
+    }
+
+    /// Check release metadata on the existing worker, without downloading MSIX.
+    pub fn request_check(&self) -> bool {
+        !self.status().busy() && self.request.try_send(UpdateRequest::Check).is_ok()
     }
 
     pub fn status(&self) -> UpdateStatus {
@@ -135,6 +272,132 @@ impl UpdateController {
 
 pub fn status_path() -> PathBuf {
     crate::config::app_directory().join("update-status.json")
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PendingReceipt {
+    package_name: String,
+    publisher: String,
+    from_version: [u16; 4],
+    target_version: [u16; 4],
+    prepared_phase: UpdatePhase,
+    prepared_at_unix: u64,
+    #[serde(default)]
+    confirmed_at_unix: Option<u64>,
+}
+
+impl PendingReceipt {
+    fn validate(&self) -> Result<()> {
+        ensure!(
+            self.package_name == PACKAGE_NAME && self.publisher == PACKAGE_PUBLISHER,
+            "Identité du reçu de mise à jour invalide"
+        );
+        ensure!(
+            self.target_version > self.from_version
+                && matches!(
+                    self.prepared_phase,
+                    UpdatePhase::ReadyOnRestart | UpdatePhase::Registered
+                ),
+            "Reçu de mise à jour invalide"
+        );
+        Ok(())
+    }
+}
+
+fn receipt_path() -> PathBuf {
+    crate::config::app_directory().join("update-pending.json")
+}
+
+fn load_receipt() -> Result<Option<PendingReceipt>> {
+    let mut file = match File::open(receipt_path()) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("Lecture du reçu de mise à jour"),
+    };
+    let mut data = Vec::new();
+    Read::by_ref(&mut file)
+        .take(MAX_RECEIPT_SIZE + 1)
+        .read_to_end(&mut data)?;
+    ensure!(
+        data.len() as u64 <= MAX_RECEIPT_SIZE,
+        "Reçu de mise à jour trop volumineux"
+    );
+    let receipt: PendingReceipt =
+        serde_json::from_slice(&data).context("Reçu de mise à jour invalide")?;
+    receipt.validate()?;
+    Ok(Some(receipt))
+}
+
+fn save_receipt(receipt: &PendingReceipt) -> Result<()> {
+    receipt.validate()?;
+    let path = receipt_path();
+    fs::create_dir_all(path.parent().context("Dossier du reçu absent")?)?;
+    let temporary = path.with_extension("json.tmp");
+    let mut file = File::create(&temporary)?;
+    file.write_all(&serde_json::to_vec_pretty(receipt)?)?;
+    file.sync_all()
+        .context("Persistance du reçu de mise à jour")?;
+    drop(file);
+    fs::rename(temporary, path).context("Enregistrement du reçu de mise à jour")
+}
+
+fn reconcile_receipt(active: [u16; 4], receipt: Option<&PendingReceipt>, now: u64) -> UpdateStatus {
+    let mut status = UpdateStatus::new(UpdatePhase::Checking, Some(version_string(active)), "");
+    if let Some(receipt) = receipt {
+        if active == receipt.target_version {
+            status.phase = UpdatePhase::Updated;
+            status.target_version = Some(version_string(receipt.target_version));
+            status.confirmed_version = status.target_version.clone();
+            status.confirmed_at_unix = Some(receipt.confirmed_at_unix.unwrap_or(now));
+        } else if active < receipt.target_version {
+            // A completed Windows operation is still pending for this process.
+            status.phase = receipt.prepared_phase;
+            status.target_version = Some(version_string(receipt.target_version));
+        }
+    }
+    status
+}
+
+fn persist_confirmation(
+    mut status: UpdateStatus,
+    receipt: Option<&PendingReceipt>,
+    persist: impl FnOnce(&PendingReceipt) -> Result<()>,
+) -> UpdateStatus {
+    if status.phase == UpdatePhase::Updated
+        && let Some(receipt) = receipt
+        && receipt.confirmed_at_unix.is_none()
+    {
+        let confirmed = PendingReceipt {
+            confirmed_at_unix: status.confirmed_at_unix,
+            ..receipt.clone()
+        };
+        if let Err(error) = persist(&confirmed) {
+            // The durable pending receipt and active identity already prove the
+            // update. Failure to persist its timestamp cannot invalidate that.
+            let detail = format!("Persistance du reçu de confirmation : {error:#}");
+            status.detail.clone_from(&detail);
+            status.check_error = Some(detail);
+        }
+    }
+    status
+}
+
+fn failed_status(mut status: UpdateStatus, error: String) -> UpdateStatus {
+    // A failed release check cannot erase a prior preparation or a confirmation
+    // established from the current process identity and durable receipt.
+    if !(matches!(
+        status.phase,
+        UpdatePhase::Updated | UpdatePhase::ReadyOnRestart | UpdatePhase::Registered
+    ) || status.phase == UpdatePhase::Checking && status.confirmed_version.is_some())
+    {
+        status.phase = UpdatePhase::Error;
+    } else if status.phase == UpdatePhase::Checking {
+        status.phase = UpdatePhase::Updated;
+    }
+    status.detail.clone_from(&error);
+    status.check_error = Some(error);
+    status.checked_at_unix = unix_seconds();
+    status
 }
 
 fn publish(state: &Mutex<UpdateStatus>, status: UpdateStatus) {
@@ -157,15 +420,30 @@ fn publish(state: &Mutex<UpdateStatus>, status: UpdateStatus) {
     }
 }
 
-fn run_request(state: &Mutex<UpdateStatus>) {
-    publish(state, UpdateStatus::new(UpdatePhase::Checking, None, ""));
-    let status = check_and_stage_with(|status| publish(state, status));
+fn run_request(state: &Mutex<UpdateStatus>, request: UpdateRequest) {
+    let mut checking = state
+        .lock()
+        .map(|status| status.clone())
+        .unwrap_or_else(|_| UpdateStatus::new(UpdatePhase::Checking, None, ""));
+    checking.phase = UpdatePhase::Checking;
+    checking.check_error = None;
+    checking.detail.clear();
+    checking.downloaded_bytes = 0;
+    checking.total_bytes = None;
+    publish(state, checking);
+    let status = match request {
+        UpdateRequest::Prepare => check_and_stage_with(|status| publish(state, status)),
+        UpdateRequest::Check => check(),
+    };
     match status {
         Ok(status) => publish(state, status),
-        Err(error) => publish(
-            state,
-            UpdateStatus::new(UpdatePhase::Error, None, format!("{error:#}")),
-        ),
+        Err(error) => {
+            let previous = state
+                .lock()
+                .map(|status| status.clone())
+                .unwrap_or_else(|_| UpdateStatus::new(UpdatePhase::Error, None, ""));
+            publish(state, failed_status(previous, format!("{error:#}")));
+        }
     }
 }
 
@@ -433,6 +711,58 @@ fn transfer_verified(
     writer: &mut impl Write,
     candidate: &Candidate,
 ) -> Result<()> {
+    transfer_verified_with(reader, writer, candidate, |_| {})
+}
+
+#[derive(Clone, Copy)]
+enum TransferEvent {
+    Bytes(u64),
+    Verifying,
+}
+
+struct DownloadProgress {
+    status: UpdateStatus,
+    last_publish: Instant,
+}
+
+impl DownloadProgress {
+    fn new(mut status: UpdateStatus, candidate: &Candidate, now: Instant) -> Self {
+        status.phase = UpdatePhase::Downloading;
+        status.target_version = Some(version_string(candidate.version));
+        status.downloaded_bytes = 0;
+        status.total_bytes = Some(candidate.size);
+        status.check_error = None;
+        Self {
+            status,
+            last_publish: now,
+        }
+    }
+
+    fn event(&mut self, event: TransferEvent, now: Instant) -> Option<UpdateStatus> {
+        match event {
+            TransferEvent::Bytes(bytes) => {
+                let total = self.status.total_bytes.unwrap_or(0);
+                self.status.downloaded_bytes = self.status.downloaded_bytes.max(bytes.min(total));
+                if now.saturating_duration_since(self.last_publish) < PROGRESS_INTERVAL {
+                    return None;
+                }
+            }
+            TransferEvent::Verifying => {
+                self.status.phase = UpdatePhase::Verifying;
+                self.status.downloaded_bytes = self.status.total_bytes.unwrap_or(0);
+            }
+        }
+        self.last_publish = now;
+        Some(self.status.clone())
+    }
+}
+
+fn transfer_verified_with(
+    reader: &mut impl Read,
+    writer: &mut impl Write,
+    candidate: &Candidate,
+    mut progress: impl FnMut(TransferEvent),
+) -> Result<()> {
     let mut buffer = [0_u8; 64 * 1024];
     let mut hash = Sha256::new();
     let mut total = 0_u64;
@@ -452,11 +782,13 @@ fn transfer_verified(
         writer
             .write_all(&buffer[..count])
             .context("Écriture du MSIX temporaire")?;
+        progress(TransferEvent::Bytes(total));
     }
     ensure!(
         total == candidate.size,
         "MSIX incomplet ou de taille incorrecte"
     );
+    progress(TransferEvent::Verifying);
     let actual: [u8; 32] = hash.finalize().into();
     ensure!(
         actual == candidate.digest,
@@ -481,7 +813,10 @@ impl Drop for TemporaryPackage {
 }
 
 #[cfg(windows)]
-fn download_candidate(candidate: &Candidate) -> Result<TemporaryPackage> {
+fn download_candidate(
+    candidate: &Candidate,
+    progress: impl FnMut(TransferEvent),
+) -> Result<TemporaryPackage> {
     use std::os::windows::fs::OpenOptionsExt;
     use windows::Win32::System::Com::CoCreateGuid;
     let directory = crate::config::app_directory().join("updates");
@@ -515,10 +850,11 @@ fn download_candidate(candidate: &Candidate) -> Result<TemporaryPackage> {
             .is_none_or(|size| size == candidate.size),
         "Taille HTTP du MSIX différente de la release"
     );
-    transfer_verified(
+    transfer_verified_with(
         &mut response,
         package.handle.as_mut().context("Fichier MSIX absent")?,
         candidate,
+        progress,
     )?;
     drop(package.handle.take());
     // FILE_SHARE_READ = 1: manifest validation and Windows can read the source,
@@ -599,7 +935,18 @@ mod windows_update {
             UpdateStatus::new(phase, Some(version_string(self.version)), detail)
         }
 
-        fn candidate(&self) -> Result<(UpdateStatus, Option<Candidate>)> {
+        fn baseline(&self, confirm: bool) -> Result<UpdateStatus> {
+            let receipt = load_receipt()?;
+            let status = reconcile_receipt(self.version, receipt.as_ref(), unix_seconds());
+            if confirm {
+                // Keep the receipt after confirmation: a future offline check
+                // must retain the evidence rather than erase it preemptively.
+                return Ok(persist_confirmation(status, receipt.as_ref(), save_receipt));
+            }
+            Ok(status)
+        }
+
+        fn candidate(&self, mut status: UpdateStatus) -> Result<(UpdateStatus, Option<Candidate>)> {
             if self.build < MINIMUM_DEFERRED_BUILD {
                 return Ok((
                     self.status(
@@ -611,40 +958,76 @@ mod windows_update {
             }
             let candidate = fetch_candidate()?;
             let phase = availability_phase(self.version, candidate.version);
-            let status = self.status(
-                phase,
-                format!(
+            // A previously staged version remains pending even if the channel
+            // now serves an equal/older release. Do not download it repeatedly.
+            let receipt = load_receipt()?;
+            let already_prepared = receipt.as_ref().is_some_and(|receipt| {
+                self.version < receipt.target_version && candidate.version <= receipt.target_version
+            });
+            if !already_prepared {
+                if phase == UpdatePhase::Available {
+                    status.phase = phase;
+                    status.target_version = Some(version_string(candidate.version));
+                } else if status.phase != UpdatePhase::Updated {
+                    status.phase = phase;
+                    status.target_version = None;
+                }
+            }
+            if status.check_error.is_none() {
+                status.detail = format!(
                     "Dernière release stable : {}",
                     version_string(candidate.version)
-                ),
-            );
+                );
+            }
+            status.checked_at_unix = unix_seconds();
             Ok((status, Some(candidate)))
         }
     }
 
     pub fn check() -> Result<UpdateStatus> {
         // Only release metadata is requested. No MSIX download or deployment.
-        Ok(PackageContext::new()?.candidate()?.0)
+        let context = PackageContext::new()?;
+        let baseline = context.baseline(false)?;
+        match context.candidate(baseline.clone()) {
+            Ok((status, _)) => Ok(status),
+            Err(error) => Ok(failed_status(baseline, format!("{error:#}"))),
+        }
     }
 
     pub fn check_and_stage(progress: impl Fn(UpdateStatus)) -> Result<UpdateStatus> {
         let context = PackageContext::new()?;
-        let (checked, candidate) = context.candidate()?;
+        let baseline = context.baseline(true)?;
+        let mut checking = baseline.clone();
+        checking.phase = UpdatePhase::Checking;
+        progress(checking);
+        let (checked, candidate) = match context.candidate(baseline.clone()) {
+            Ok(value) => value,
+            Err(error) => {
+                // Restore the receipt-backed proof before the controller adds
+                // the failed-check detail; checking remains busy during HTTP.
+                progress(baseline);
+                return Err(error);
+            }
+        };
         if !staging_allowed(checked.phase) {
             return Ok(checked);
         }
         let candidate = candidate.context("Release disponible sans package")?;
-        progress(context.status(
-            UpdatePhase::Preparing,
-            format!("Version cible : {}", version_string(candidate.version)),
-        ));
-        let package = download_candidate(&candidate)?;
+        let mut download = DownloadProgress::new(checked, &candidate, Instant::now());
+        progress(download.status.clone());
+        let package = download_candidate(&candidate, |event| {
+            if let Some(status) = download.event(event, Instant::now()) {
+                progress(status);
+            }
+        })?;
         crate::update_package::validate(
             &package.path,
             PACKAGE_NAME,
             PACKAGE_PUBLISHER,
             candidate.version,
         )?;
+        download.status.phase = UpdatePhase::Preparing;
+        progress(download.status.clone());
         let options = AddPackageOptions::new()?;
         options.SetDeferRegistrationWhenPackagesAreInUse(true)?;
         options.SetForceAppShutdown(false)?;
@@ -667,12 +1050,20 @@ mod windows_update {
             false
         };
         let phase = deployment_phase(code.0, registered)?;
+        save_receipt(&PendingReceipt {
+            package_name: PACKAGE_NAME.into(),
+            publisher: PACKAGE_PUBLISHER.into(),
+            from_version: context.version,
+            target_version: candidate.version,
+            prepared_phase: phase,
+            prepared_at_unix: unix_seconds(),
+            confirmed_at_unix: None,
+        })?;
         // The completed operation has extracted/staged the payload in Windows'
         // PackageVolume. Dropping package now removes only our source archive.
-        Ok(context.status(
-            phase,
-            format!("Version cible : {}", version_string(candidate.version)),
-        ))
+        download.status.phase = phase;
+        download.status.detail = format!("Version cible : {}", version_string(candidate.version));
+        Ok(download.status)
     }
 }
 
@@ -695,6 +1086,220 @@ mod tests {
 
     fn parse(value: &Value) -> Result<Candidate> {
         parse_candidate(&serde_json::to_vec(value)?)
+    }
+
+    fn prepared_receipt() -> PendingReceipt {
+        PendingReceipt {
+            package_name: PACKAGE_NAME.into(),
+            publisher: PACKAGE_PUBLISHER.into(),
+            from_version: [1, 0, 1, 0],
+            target_version: [1, 0, 2, 0],
+            prepared_phase: UpdatePhase::Registered,
+            prepared_at_unix: 20,
+            confirmed_at_unix: None,
+        }
+    }
+
+    #[test]
+    fn old_status_json_and_localized_display_remain_compatible() {
+        let old = json!({
+            "phase":"ready_on_restart", "installed_version":"1.0.1.0",
+            "checked_at_unix":12, "detail":"Version cible : 1.0.2.0"
+        });
+        let status: UpdateStatus = serde_json::from_value(old).unwrap();
+        assert!(status.active_version.is_none());
+        assert!(status.target_version.is_none());
+        assert_eq!(status.downloaded_bytes, 0);
+        assert!(status.total_bytes.is_none());
+        assert!(
+            status
+                .display_lines("fr")
+                .contains(&"Version active : 1.0.1.0".into())
+        );
+        assert!(
+            status
+                .display_lines("en")
+                .contains(&"Active version : 1.0.1.0".into())
+        );
+        for phase in [
+            UpdatePhase::Checking,
+            UpdatePhase::Downloading,
+            UpdatePhase::Verifying,
+            UpdatePhase::Preparing,
+        ] {
+            assert!(UpdateStatus::new(phase, None, "").busy());
+        }
+        assert!(!UpdateStatus::new(UpdatePhase::Updated, None, "").busy());
+    }
+
+    #[test]
+    fn download_progress_is_bounded_monotonic_and_throttled() {
+        let candidate = Candidate {
+            size: 10_000,
+            ..parse(&fixture()).unwrap()
+        };
+        let start = Instant::now();
+        let mut progress = DownloadProgress::new(
+            UpdateStatus::new(UpdatePhase::Available, Some("1.0.1.0".into()), ""),
+            &candidate,
+            start,
+        );
+        let mut published = Vec::new();
+        for tick in 1..=10_000_u64 {
+            if let Some(status) = progress.event(
+                TransferEvent::Bytes(tick),
+                start + Duration::from_millis(tick),
+            ) {
+                published.push(status);
+            }
+        }
+        assert_eq!(published.len(), 10);
+        assert!(
+            published
+                .iter()
+                .all(|status| status.downloaded_bytes <= candidate.size)
+        );
+        assert!(
+            published
+                .windows(2)
+                .all(|pair| pair[0].downloaded_bytes <= pair[1].downloaded_bytes)
+        );
+        assert_eq!(progress.status.downloaded_bytes, 10_000);
+        assert!(
+            progress
+                .event(
+                    TransferEvent::Bytes(20_000),
+                    start + Duration::from_millis(10_001)
+                )
+                .is_none()
+        );
+        assert!(
+            progress
+                .event(
+                    TransferEvent::Bytes(1),
+                    start + Duration::from_millis(10_001)
+                )
+                .is_none()
+        );
+        assert_eq!(progress.status.downloaded_bytes, 10_000);
+        let verifying = progress
+            .event(
+                TransferEvent::Verifying,
+                start + Duration::from_millis(10_002),
+            )
+            .unwrap();
+        assert_eq!(verifying.phase, UpdatePhase::Verifying);
+        assert!(verifying.busy());
+        assert_eq!(verifying.downloaded_bytes, candidate.size);
+        assert_eq!(verifying.target_version.as_deref(), Some("1.0.2.0"));
+        assert!(
+            verifying
+                .display_lines("en")
+                .iter()
+                .any(|line| line.contains("100 %"))
+        );
+    }
+
+    #[test]
+    fn corruption_stops_after_verification_and_never_becomes_ready() {
+        let candidate = parse(&fixture()).unwrap();
+        let start = Instant::now();
+        let mut progress = DownloadProgress::new(
+            UpdateStatus::new(UpdatePhase::Available, Some("1.0.1.0".into()), ""),
+            &candidate,
+            start,
+        );
+        let result = transfer_verified_with(
+            &mut std::io::Cursor::new(b"abd"),
+            &mut Vec::new(),
+            &candidate,
+            |event| {
+                let _ = progress.event(event, start + PROGRESS_INTERVAL);
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(progress.status.phase, UpdatePhase::Verifying);
+        let failed = failed_status(progress.status, result.unwrap_err().to_string());
+        assert_eq!(failed.phase, UpdatePhase::Error);
+        assert!(!failed.busy());
+        assert_eq!(failed.active_version.as_deref(), Some("1.0.1.0"));
+        assert_eq!(failed.target_version.as_deref(), Some("1.0.2.0"));
+    }
+
+    #[test]
+    fn receipt_confirms_only_the_active_target_and_survives_offline_check() {
+        let mut receipt = prepared_receipt();
+        receipt.validate().unwrap();
+        let old = reconcile_receipt([1, 0, 1, 0], Some(&receipt), 30);
+        assert_eq!(old.phase, UpdatePhase::Registered);
+        assert_eq!(old.active_version.as_deref(), Some("1.0.1.0"));
+        assert_eq!(old.target_version.as_deref(), Some("1.0.2.0"));
+        assert!(old.confirmed_version.is_none());
+        let pending_offline = failed_status(old, "Réseau indisponible".into());
+        assert_eq!(pending_offline.phase, UpdatePhase::Registered);
+        assert_eq!(pending_offline.target_version.as_deref(), Some("1.0.2.0"));
+        assert!(pending_offline.confirmed_version.is_none());
+        let relaunched = reconcile_receipt([1, 0, 2, 0], Some(&receipt), 40);
+        assert_eq!(relaunched.phase, UpdatePhase::Updated);
+        assert_eq!(relaunched.confirmed_version.as_deref(), Some("1.0.2.0"));
+        assert_eq!(relaunched.confirmed_at_unix, Some(40));
+        receipt.confirmed_at_unix = relaunched.confirmed_at_unix;
+        let persisted: PendingReceipt =
+            serde_json::from_slice(&serde_json::to_vec(&receipt).unwrap()).unwrap();
+        let later = reconcile_receipt([1, 0, 2, 0], Some(&persisted), 90);
+        assert_eq!(later.confirmed_at_unix, Some(40));
+        let offline = failed_status(later, "Délai HTTP dépassé".into());
+        assert_eq!(offline.phase, UpdatePhase::Updated);
+        assert_eq!(offline.confirmed_at_unix, Some(40));
+        assert!(offline.check_error.is_some());
+        assert!(
+            offline
+                .display_lines("fr")
+                .iter()
+                .any(|line| line.contains("confirmée au lancement"))
+        );
+        // A greater active version is not proof that this exact target ran.
+        assert_eq!(
+            reconcile_receipt([1, 0, 3, 0], Some(&receipt), 90).phase,
+            UpdatePhase::Checking
+        );
+        receipt.prepared_phase = UpdatePhase::Verifying;
+        assert!(receipt.validate().is_err());
+    }
+
+    #[test]
+    fn confirmation_write_failure_preserves_proof_and_the_pending_receipt() {
+        let receipt = prepared_receipt();
+        let active = reconcile_receipt([1, 0, 2, 0], Some(&receipt), 40);
+        let mut attempted = None;
+        let confirmed = persist_confirmation(active, Some(&receipt), |value| {
+            attempted = Some(value.clone());
+            Err(anyhow::anyhow!("synthetic write failure"))
+        });
+        assert_eq!(confirmed.phase, UpdatePhase::Updated);
+        assert_eq!(confirmed.active_version.as_deref(), Some("1.0.2.0"));
+        assert_eq!(confirmed.confirmed_version.as_deref(), Some("1.0.2.0"));
+        assert_eq!(confirmed.confirmed_at_unix, Some(40));
+        assert!(confirmed.detail.contains("synthetic write failure"));
+        assert_eq!(
+            confirmed.check_error.as_deref(),
+            Some(confirmed.detail.as_str())
+        );
+        assert_eq!(attempted.unwrap().confirmed_at_unix, Some(40));
+        // The durable input is unchanged and can prove the update next launch.
+        assert!(receipt.confirmed_at_unix.is_none());
+        assert_eq!(receipt.prepared_phase, UpdatePhase::Registered);
+        let relaunched = reconcile_receipt([1, 0, 2, 0], Some(&receipt), 60);
+        assert_eq!(relaunched.phase, UpdatePhase::Updated);
+        let persisted = persist_confirmation(relaunched, Some(&receipt), |_| Ok(()));
+        assert!(persisted.check_error.is_none());
+
+        let pending = reconcile_receipt([1, 0, 1, 0], Some(&receipt), 70);
+        let pending = persist_confirmation(pending, Some(&receipt), |_| {
+            panic!("an inactive target must never be confirmed")
+        });
+        assert_eq!(pending.phase, UpdatePhase::Registered);
+        assert!(pending.confirmed_version.is_none());
     }
 
     #[test]

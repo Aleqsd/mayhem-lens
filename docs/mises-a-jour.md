@@ -1,6 +1,6 @@
 # Mises à jour de Mayhem Lens
 
-La version expérimentale 1.0.1 consulte les releases GitHub au lancement et depuis le menu de l'icône système. Une version supérieure est téléchargée sous forme de MSIX local, contrôlée, puis confiée au gestionnaire de packages Windows. L'inscription est différée pendant que Mayhem Lens est utilisé ; la nouvelle version doit prendre effet au prochain lancement.
+La version expérimentale 1.1.0 consulte les releases GitHub au lancement et depuis le menu de l'icône système. Une version supérieure est téléchargée sous forme de MSIX local, contrôlée, puis confiée au gestionnaire de packages Windows. L'inscription est différée pendant que Mayhem Lens est utilisé ; la nouvelle version doit prendre effet au prochain lancement.
 
 La confiance du certificat, l'installation depuis la release et l'application effective d'une mise à jour sur un PC restent à valider. La compilation, les tests unitaires et la création d'un MSIX ne constituent pas cette preuve.
 
@@ -45,7 +45,9 @@ Windows traite le package signé et reporte son inscription jusqu'à une prochai
 
 Une opération terminée ne prouve pas que le processus actif a changé de version. Le résultat de déploiement distingue la préparation différée de l'inscription du package ; la version réellement exécutée est vérifiée au lancement suivant via `Package.Id.Version`. [Résultat de déploiement](https://learn.microsoft.com/en-us/uwp/api/windows.management.deployment.deploymentresult?view=winrt-26100).
 
-Le menu expose l'état et `update-status.json` conserve la phase, la version installée connue et la date du contrôle, dans le dossier de données de l'application. « Mise à jour préparée — prochain lancement » indique une préparation différée ; relancer normalement Mayhem Lens permet de vérifier la version active.
+Le menu et la fenêtre de réglages exposent l'état. `update-status.json` conserve la version active issue de l'identité du processus, la version cible, les octets téléchargés et les phases recherche, téléchargement, vérification et préparation. La progression est bornée et publiée au plus une fois par seconde pendant le transfert, avec une publication finale. Le panneau permet de rechercher les métadonnées seules puis de préparer la mise à jour.
+
+Après acceptation du package par Windows, `update-pending.json` garde l'identité et la cible attendue. « Mise à jour préparée — prochain lancement » ne signifie pas que le processus actif a changé de version. La confirmation « Mise à jour appliquée » exige que la version observée via `Package.Current.Id.Version` soit exactement celle du reçu. Ce reçu est conservé après confirmation ; un échec réseau ultérieur ne supprime pas cette preuve. Un fichier téléchargé, un digest réussi ou `IsRegistered` seul ne produisent pas cette confirmation.
 
 ## Validation restante
 

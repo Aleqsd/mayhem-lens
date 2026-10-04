@@ -1,6 +1,6 @@
 # Installation Windows
 
-La version 1.0.1 est expérimentale. L'installation se fait en téléchargeant et ouvrant le MSIX signé. Le script de packaging produit un MSIX non signé ; la signature de développement est une étape séparée. Ces scripts n'installent rien, ne modifient pas le magasin de certificats et ne lancent pas l'overlay.
+La version 1.1.0 est expérimentale. L'installation se fait en téléchargeant et ouvrant le MSIX signé. Le script de packaging produit un MSIX non signé ; la signature de développement est une étape séparée. Ces scripts n'installent rien, ne modifient pas le magasin de certificats et ne lancent pas l'overlay.
 
 ## Préparer
 
@@ -19,21 +19,21 @@ Un MSIX doit être signé par un certificat dont le sujet correspond exactement 
 `scripts/sign-development.ps1` peut préparer cette signature sans installer l'application ni modifier les magasins de certificats. Il crée une clé de développement sauvegardée chiffrée par DPAPI pour l'utilisateur Windows courant, signe le package et exporte uniquement le certificat public à partager. Le PFX temporaire est supprimé. Une signature ne vaut pas approbation du certificat sur la machine destinataire.
 
 ```powershell
-./scripts/sign-development.ps1 -PackagePath 'dist\MayhemLens_1.0.1.0_x64.msix' `
+./scripts/sign-development.ps1 -PackagePath 'dist\MayhemLens_1.1.0.0_x64.msix' `
   -SigningDirectory 'dist\private-signing' -PublicCertificatePath 'dist\MayhemLens-Development.cer'
 ```
 
 Le Windows SDK contient `SignTool.exe`. Exemple avec un certificat déjà présent et utilisable dans le magasin de l'utilisateur :
 
 ```powershell
-& '<Windows SDK>\x64\signtool.exe' sign /fd SHA256 /sha1 '<empreinte du certificat>' 'dist\MayhemLens_1.0.1.0_x64.msix'
+& '<Windows SDK>\x64\signtool.exe' sign /fd SHA256 /sha1 '<empreinte du certificat>' 'dist\MayhemLens_1.1.0.0_x64.msix'
 ```
 
 Ne pas committer ou partager la clé privée/PFX. Le fichier `.cer` distribué contient uniquement la clé publique. Un certificat de développement doit être approuvé dans le magasin de l'ordinateur `Trusted People` sur chaque PC de test ; cette étape demande les droits administrateur. [Documentation Microsoft sur les certificats de test](https://learn.microsoft.com/en-us/windows/uwp/packaging/create-certificate-package-signing).
 
 ## Installer depuis une release
 
-1. Ouvrir la [dernière release GitHub](https://github.com/Aleqsd/mayhem-lens/releases/latest) et télécharger `MayhemLens-Development.cer` ainsi que `MayhemLens_1.0.1.0_x64.msix` pour la version 1.0.1.
+1. Ouvrir la [dernière release GitHub](https://github.com/Aleqsd/mayhem-lens/releases/latest) et télécharger `MayhemLens-Development.cer` ainsi que `MayhemLens_1.1.0.0_x64.msix` pour la version 1.1.0.
 2. Approuver le certificat public dans le magasin de l'ordinateur **Trusted People** (`LocalMachine\TrustedPeople`). Cette étape demande les droits administrateur. Depuis PowerShell ouvert en administrateur, dans le dossier du certificat :
 
    ```powershell
@@ -45,7 +45,7 @@ Ne pas committer ou partager la clé privée/PFX. Le fichier `.cer` distribué c
 
 À partir de la version 1.0.1, le MSIX direct est le parcours prévu ; aucune association à un fichier `.appinstaller` n'est requise. La [signature MSIX et sa confiance sur le PC](https://learn.microsoft.com/en-us/windows/msix/package/signing-package-overview) restent vérifiées par Windows.
 
-Si la version 1.0.0 est déjà installée, ouvrir manuellement le MSIX 1.0.1 pour adopter ce mécanisme de mises à jour.
+Si la version 1.0.0 est déjà installée, ouvrir manuellement le MSIX 1.1.0 pour adopter ce mécanisme de mises à jour. Les versions 1.0.1 ou ultérieures disposent déjà du téléchargement natif ; le certificat reste identique et n'a pas à être approuvé à nouveau s'il est déjà installé.
 
 Le code et les fichiers de release sont publics. Les clés privées, configurations personnelles, caches, captures et datasets tiers restent hors du dépôt et du package.
 
@@ -55,7 +55,7 @@ L'application consulte la dernière release stable GitHub en arrière-plan au la
 
 La préparation ne demande pas l'arrêt forcé de l'overlay ou du jeu, et aucun EXE n'est remplacé manuellement. Hors ligne, si GitHub est indisponible ou si un contrôle échoue, l'application continue avec sa version actuelle et ne présente pas cet échec comme une preuve qu'elle est à jour. Le certificat de développement doit rester approuvé pour que Windows accepte les versions suivantes.
 
-L'état est enregistré séparément dans `update-status.json`, dans le dossier de données décrit ci-dessous. Le libellé « Mise à jour préparée — prochain lancement » indique une préparation différée ; relancer normalement l'overlay permet de vérifier la version active. Deux commandes sont également disponibles depuis le package installé :
+La fenêtre **Réglages → Mises à jour** affiche les versions active et cible, le téléchargement et la préparation. **Vérifier** consulte seulement les métadonnées ; **Préparer la mise à jour** télécharge et demande sa préparation à Windows. L'état est enregistré dans `update-status.json`, et `update-pending.json` conserve la cible attendue après une préparation acceptée. Le libellé « Mise à jour préparée — prochain lancement » indique une préparation différée ; « Mise à jour appliquée » nécessite une version active identique à la cible après relance. Deux commandes sont également disponibles depuis le package installé :
 
 ```powershell
 # Vérification seule, sans préparer de déploiement.
@@ -72,7 +72,13 @@ Installer la fonctionnalité OCR française et/ou anglaise dans les langues Wind
 
 Lancer depuis l'application installée, ou l'alias d'exécution du package. `run` crée l'icône système et attend une partie dont le mode local est `KIWI`. Les données du MSIX sont dans `%LOCALAPPDATA%\Packages\<famille du package>\LocalState\MayhemLens` ; la famille commence par `Aleqsd.MayhemLens_` et reste stable entre versions. L'exécutable seul utilise `%LOCALAPPDATA%\MayhemLens`. Les erreurs sont conservées dans `last-error.txt` et l'état dans `runtime-status.json` dans ce dossier ; aucune réponse contenant les identités des joueurs n'est enregistrée.
 
-Les titres sont lus dans une bande relative à la fenêtre du jeu. Les noms longs sont regroupés conservativement. La zone doit être calibrée sur des choix réels FR/EN avant d'annoncer une précision ou une latence. Les contenus HDR ne sont pas convertis dans ce prototype.
+La capture découvre une zone centrale large, apprend la géométrie des titres après deux retours cohérents et recommence après une lecture manquée ou un changement de fenêtre. Les noms longs sont regroupés conservativement. Les formats de cartes et d'en-têtes réels FR/EN restent à valider avant d'annoncer une précision ou une latence. Les contenus HDR ne sont pas convertis dans ce prototype.
+
+## Réglages accessibles
+
+Ouvrir **Réglages** depuis l'icône système. La fenêtre apparaît uniquement à cette demande et présente trois pages : **Général**, **Raccourcis** et **Mises à jour**. Langue, intervalle de scan, seuil de similarité, builds, stade, taille, opacité et décalages sont modifiables sans éditer le JSON. Les raccourcis peuvent être remplacés ; un conflit reste signalé dans le menu.
+
+**Enregistrer** valide et applique les préférences ; **Annuler** ou Échap ne les enregistrent pas. Les valeurs par défaut restent un brouillon jusqu'à l'enregistrement. La saisie du stade prime sur l'automatique ; sans ordinal explicite reconnu dans l'en-tête, le mode automatique garde le tier champion et affiche que le choix est inconnu. Une lecture approchée exige deux observations stables au-dessus du seuil ; en dessous, les badges indiquent une lecture incertaine sans tier ni build, avec le raccourci de relecture configuré.
 
 L'exécutable x64 lie le runtime C statiquement pour éviter une installation séparée de Visual C++ Redistributable. Les commandes d'un exécutable GUI lancées directement depuis PowerShell peuvent nécessiter `| Out-String` pour capturer leur sortie et attendre leur fin.
 

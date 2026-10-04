@@ -1,4 +1,4 @@
-use super::{Badge, Observation, Rect, UserAction};
+use super::{Badge, CaptureReading, Observation, Rect, UserAction};
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 use std::{
@@ -54,7 +54,7 @@ use windows::{
                 DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
                 DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD,
                 DWRITE_MEASURING_MODE_NATURAL, DWRITE_WORD_WRAPPING_WRAP, DWriteCreateFactory,
-                IDWriteFactory, IDWriteTextFormat,
+                IDWriteFactory,
             },
             Dxgi::{
                 Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC},
@@ -83,9 +83,7 @@ use windows::{
                 DPI_AWARENESS_CONTEXT, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
                 SetThreadDpiAwarenessContext,
             },
-            Input::KeyboardAndMouse::{
-                MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, RegisterHotKey, UnregisterHotKey,
-            },
+            Input::KeyboardAndMouse::{MOD_NOREPEAT, RegisterHotKey, UnregisterHotKey},
             Shell::{
                 NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
                 Shell_NotifyIconW, ShellExecuteW,
@@ -280,6 +278,13 @@ pub fn game_window_visible() -> bool {
     game_window().is_some_and(|hwnd| unsafe { GetForegroundWindow() == hwnd })
 }
 
+pub fn reading_is_current(bounds: Rect) -> bool {
+    game_window().is_some_and(|hwnd| {
+        (unsafe { GetForegroundWindow() == hwnd })
+            && window_bounds(hwnd).is_ok_and(|current| current == bounds)
+    })
+}
+
 fn window_bounds(hwnd: HWND) -> Result<Rect> {
     let _dpi = DpiContext::new();
     let mut rect = RECT::default();
@@ -306,7 +311,25 @@ pub fn invalidate_observations() {
     });
 }
 
-pub fn observe_game(language: &str) -> Result<Vec<Observation>> {
+pub fn calibrate_offers(rects: &[Rect]) {
+    CAPTURE_WORKER.with(|cell| {
+        if let Some(worker) = cell.borrow_mut().as_mut() {
+            worker.calibration.feedback(rects);
+        }
+    });
+}
+
+pub fn reset_calibration() {
+    CAPTURE_WORKER.with(|cell| {
+        if let Some(worker) = cell.borrow_mut().as_mut() {
+            worker.calibration.reset();
+            worker.last_signature = None;
+            worker.last_observations.clear();
+        }
+    });
+}
+
+pub fn observe_game(language: &str) -> Result<CaptureReading> {
     let hwnd = game_window().context("Fenêtre LoL visible introuvable")?;
     ensure!(
         unsafe { GetForegroundWindow() == hwnd },
@@ -323,7 +346,7 @@ pub fn observe_game(language: &str) -> Result<Vec<Observation>> {
         }
         let worker = state.as_mut().context("Worker capture indisponible")?;
         match worker.observe(hwnd, bounds) {
-            Ok(observations) => Ok(observations),
+            Ok(reading) => Ok(reading),
             Err(error) => {
                 // Discard potentially lost GPU resources; the next call recreates them.
                 *state = None;
@@ -354,8 +377,9 @@ struct CaptureWorker {
     source: Option<CaptureSource>,
     staging: Option<ID3D11Texture2D>,
     staging_size: (u32, u32),
-    last_signature: Option<(u64, Rect, usize, usize)>,
+    last_signature: Option<(u64, Rect, Rect, usize, usize)>,
     last_observations: Vec<Observation>,
+    calibration: crate::calibration::Calibration,
     // Must drop last, after the WinRT/COM fields declared above.
     _apartment: Apartment,
 }
@@ -415,11 +439,13 @@ impl CaptureWorker {
             staging_size: (0, 0),
             last_signature: None,
             last_observations: Vec::new(),
+            calibration: crate::calibration::Calibration::default(),
             _apartment: apartment,
         })
     }
 
-    fn observe(&mut self, hwnd: HWND, bounds: Rect) -> Result<Vec<Observation>> {
+    fn observe(&mut self, hwnd: HWND, bounds: Rect) -> Result<CaptureReading> {
+        let calibration = self.calibration.next(bounds);
         let interop: IGraphicsCaptureItemInterop =
             factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()?;
         // SAFETY: this targets only the visible game HWND identified above, never memory.
@@ -450,6 +476,10 @@ impl CaptureWorker {
         while let Ok(frame) = source.pool.TryGetNextFrame() {
             let _ = frame.Close();
         }
+        ensure!(
+            unsafe { GetForegroundWindow() == hwnd } && window_bounds(hwnd)? == bounds,
+            "Le jeu a changé avant le démarrage de la capture"
+        );
         let session = source.pool.CreateCaptureSession(&source.item)?;
         let _ = session.SetIsCursorCaptureEnabled(false);
         let _ = session.SetMinUpdateInterval(TimeSpan {
@@ -459,7 +489,7 @@ impl CaptureWorker {
         let frame = next_frame(&source.pool);
         let _ = session.Close();
         let frame = frame?;
-        let image_result = self.copy_title_band(&frame);
+        let image_result = self.copy_title_band(&frame, bounds, calibration.roi);
         let _ = frame.Close();
         let mut image = image_result?;
         // Foreground and geometry are rechecked after capture to reject stale work.
@@ -470,11 +500,25 @@ impl CaptureWorker {
         let signature = (
             fingerprint(&image.pixels),
             bounds,
-            image.width,
-            image.height,
+            Rect {
+                x: image.left as i32,
+                y: image.top as i32,
+                width: image.source_width as i32,
+                height: image.source_height as i32,
+            },
+            image.frame_width,
+            image.frame_height,
         );
         if self.last_signature == Some(signature) {
-            return Ok(self.last_observations.clone());
+            ensure!(
+                unsafe { GetForegroundWindow() == hwnd } && window_bounds(hwnd)? == bounds,
+                "Le jeu a changé pendant la reconnaissance en cache"
+            );
+            return Ok(CaptureReading {
+                observations: self.last_observations.clone(),
+                game_bounds: bounds,
+                calibration,
+            });
         }
         // Windows OCR has a finite bitmap size. Reduce only this ROI, retaining
         // its native dimensions for projection back to the game's physical pixels.
@@ -547,21 +591,32 @@ impl CaptureWorker {
         );
         self.last_signature = Some(signature);
         self.last_observations = observations.clone();
-        Ok(observations)
+        Ok(CaptureReading {
+            observations,
+            game_bounds: bounds,
+            calibration,
+        })
     }
 
-    fn copy_title_band(&mut self, frame: &Direct3D11CaptureFrame) -> Result<CapturedBand> {
+    fn copy_title_band(
+        &mut self,
+        frame: &Direct3D11CaptureFrame,
+        bounds: Rect,
+        roi: Rect,
+    ) -> Result<CapturedBand> {
         let size = frame.ContentSize()?;
         ensure!(
             size.Width >= 320 && size.Height >= 240,
             "Frame WGC trop petite"
         );
-        // Fractions of the captured game, independent of monitor/DPI. This initial
-        // broad title band must be calibrated with authorized FR/EN captures.
-        let left = (size.Width as f32 * 0.12).round() as u32;
-        let top = (size.Height as f32 * 0.28).round() as u32;
-        let width = (size.Width as f32 * 0.76).round() as u32;
-        let height = (size.Height as f32 * 0.32).round() as u32;
+        // The learned ROI is in physical screen pixels. Project into WGC's frame
+        // separately: frame dimensions can differ from window bounds/DPI.
+        let frame_roi = crate::calibration::frame_region(bounds, roi, size.Width, size.Height)
+            .context("Zone OCR de calibrage invalide")?;
+        let left = frame_roi.x as u32;
+        let top = frame_roi.y as u32;
+        let width = frame_roi.width as u32;
+        let height = frame_roi.height as u32;
         let access: IDirect3DDxgiInterfaceAccess = frame.Surface()?.cast()?;
         // SAFETY: WGC's surface implements the documented DXGI access interop.
         let texture: ID3D11Texture2D = unsafe { access.GetInterface()? };
@@ -791,7 +846,7 @@ fn fingerprint(bytes: &[u8]) -> u64 {
 #[serde(rename_all = "camelCase")]
 struct HotkeyWarning {
     // Both fields are controlled locally, never formatted OS/source error text.
-    shortcut: &'static str,
+    shortcut: String,
     error_code: String,
 }
 
@@ -801,23 +856,32 @@ struct HotkeyRegistrations {
 }
 
 fn register_hotkeys_with(
-    mut register: impl FnMut(i32, u32) -> std::result::Result<(), i32>,
+    shortcuts: &crate::config::ShortcutConfig,
+    mut register: impl FnMut(i32, crate::config::ParsedShortcut) -> std::result::Result<(), i32>,
 ) -> HotkeyRegistrations {
     let mut registrations = HotkeyRegistrations {
         registered: Vec::new(),
         unavailable: Vec::new(),
     };
-    for (id, key, shortcut) in [
-        (HOTKEY_SCAN, b'M', "Ctrl+Shift+M"),
-        (HOTKEY_QUIT, b'Q', "Ctrl+Shift+Q"),
-        (HOTKEY_SLOT_1, b'1', "Ctrl+Shift+1"),
-        (HOTKEY_SLOT_2, b'2', "Ctrl+Shift+2"),
-        (HOTKEY_SLOT_3, b'3', "Ctrl+Shift+3"),
-    ] {
-        match register(id, u32::from(key)) {
+    for (id, shortcut) in [
+        HOTKEY_SCAN,
+        HOTKEY_QUIT,
+        HOTKEY_SLOT_1,
+        HOTKEY_SLOT_2,
+        HOTKEY_SLOT_3,
+    ]
+    .into_iter()
+    .zip(shortcuts.values())
+    {
+        // Validated configuration normally makes this branch infallible; do not
+        // register an invented binding if a caller supplied malformed settings.
+        let result = crate::config::parse_shortcut(shortcut)
+            .map_err(|_| 0x8007_0057_u32 as i32)
+            .and_then(|binding| register(id, binding));
+        match result {
             Ok(()) => registrations.registered.push(id),
             Err(code) => registrations.unavailable.push(HotkeyWarning {
-                shortcut,
+                shortcut: shortcut.to_owned(),
                 error_code: format!("0x{:08X}", code as u32),
             }),
         }
@@ -827,16 +891,33 @@ fn register_hotkeys_with(
 
 struct Hotkeys(HotkeyRegistrations);
 impl Hotkeys {
-    fn new() -> Self {
-        Self(register_hotkeys_with(|id, key| {
+    fn new(shortcuts: &crate::config::ShortcutConfig) -> Self {
+        Self(register_hotkeys_with(shortcuts, |id, binding| {
             // SAFETY: thread-owned hotkey registration, no keyboard input injection.
-            unsafe { RegisterHotKey(None, id, MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT, key) }
-                .map_err(|error| error.code().0)
+            unsafe {
+                RegisterHotKey(
+                    None,
+                    id,
+                    windows::Win32::UI::Input::KeyboardAndMouse::HOT_KEY_MODIFIERS(
+                        binding.modifiers,
+                    ) | MOD_NOREPEAT,
+                    binding.virtual_key,
+                )
+            }
+            .map_err(|error| error.code().0)
         }))
     }
 
     fn available(&self, id: i32) -> bool {
         self.0.registered.contains(&id)
+    }
+
+    fn reload(&mut self, shortcuts: &crate::config::ShortcutConfig) {
+        // Unregister before re-registering unchanged IDs on the same UI thread.
+        for id in self.0.registered.drain(..) {
+            let _ = unsafe { UnregisterHotKey(None, id) };
+        }
+        *self = Self::new(shortcuts);
     }
 }
 impl Drop for Hotkeys {
@@ -956,6 +1037,7 @@ impl Tray {
         config_path: &std::path::Path,
         updates: &crate::update::UpdateController,
         hotkeys: &Hotkeys,
+        settings: &mut Option<crate::settings::SettingsWindow>,
     ) -> Result<()> {
         let menu = PopupMenu(unsafe { CreatePopupMenu() }?);
         let config = crate::config::Config::load(config_path)?;
@@ -971,7 +1053,7 @@ impl Tray {
             "Scanner au retour au jeu"
         };
         let scan = HSTRING::from(if hotkeys.available(HOTKEY_SCAN) {
-            format!("{scan_label}  (Ctrl+Shift+M)")
+            format!("{scan_label}  ({})", config.shortcuts.scan)
         } else {
             scan_label.into()
         });
@@ -993,7 +1075,25 @@ impl Tray {
             unsafe { AppendMenuW(menu.0, MF_SEPARATOR, 0, None) }?;
         }
         let stage = config.offer_stage;
-        let unknown_flags = if stage.is_none() {
+        // Automatic is an explicit mode; Unknown disables inference entirely.
+        const MENU_STAGE_AUTO: u32 = 209;
+        unsafe {
+            AppendMenuW(
+                menu.0,
+                if config.auto_stage && stage.is_none() {
+                    MF_STRING | MF_CHECKED
+                } else {
+                    MF_STRING
+                },
+                MENU_STAGE_AUTO as usize,
+                &HSTRING::from(if english {
+                    "Automatic stage"
+                } else {
+                    "Stade automatique"
+                }),
+            )
+        }?;
+        let unknown_flags = if stage.is_none() && !config.auto_stage {
             MF_STRING | MF_CHECKED
         } else {
             MF_STRING
@@ -1051,9 +1151,9 @@ impl Tray {
                 MF_STRING,
                 MENU_SETTINGS as usize,
                 &HSTRING::from(if english {
-                    "Open settings"
+                    "Settings…"
                 } else {
-                    "Ouvrir la configuration"
+                    "Réglages…"
                 }),
             )?;
             AppendMenuW(
@@ -1068,7 +1168,7 @@ impl Tray {
                         (false, false) => "Quitter",
                     };
                     if hotkeys.available(HOTKEY_QUIT) {
-                        format!("{label}  (Ctrl+Shift+Q)")
+                        format!("{label}  ({})", config.shortcuts.quit)
                     } else {
                         label.into()
                     }
@@ -1098,22 +1198,24 @@ impl Tray {
             MENU_STAGE_UNKNOWN => {
                 let _ = actions.send(UserAction::SetStage(None));
             }
+            MENU_STAGE_AUTO => {
+                let _ = actions.send(UserAction::SetAutoStage(true));
+            }
             MENU_STAGE_1..=MENU_STAGE_4 => {
                 let _ = actions.send(UserAction::SetStage(Some(
                     (command - MENU_STAGE_1 + 1) as u8,
                 )));
             }
             MENU_SETTINGS => {
-                let file = HSTRING::from(config_path.as_os_str().to_string_lossy().as_ref());
-                // Shell execution is exclusively this user-selected menu action.
-                let result = unsafe {
-                    ShellExecuteW(Some(self.owner.0), w!("open"), &file, None, None, SW_SHOW)
-                };
-                ensure!(
-                    result.0 as isize > 32,
-                    "Impossible d'ouvrir la configuration ({})",
-                    result.0 as isize
-                );
+                if let Some(window) = settings.as_ref().filter(|window| window.is_open()) {
+                    window.show();
+                } else {
+                    *settings = Some(crate::settings::SettingsWindow::open(
+                        self.owner.0,
+                        config_path,
+                        updates.clone(),
+                    )?);
+                }
             }
             MENU_UPDATE => {
                 if update_status.phase == crate::update::UpdatePhase::Unsupported {
@@ -1195,8 +1297,7 @@ impl Drop for Dib {
 
 struct BadgeRenderer {
     target: ID2D1DCRenderTarget,
-    title: IDWriteTextFormat,
-    detail: IDWriteTextFormat,
+    dwrite: IDWriteFactory,
 }
 impl BadgeRenderer {
     fn new() -> Result<Self> {
@@ -1216,38 +1317,37 @@ impl BadgeRenderer {
             })?;
             target.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
             let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
-            let title = dwrite.CreateTextFormat(
+            Ok(Self { target, dwrite })
+        }
+    }
+
+    fn paint(&self, window: HWND, badge: &Badge, bounds: Rect, opacity: u8) -> Result<()> {
+        let dib = Dib::new(bounds.width, bounds.height)?;
+        // Geometry has already been scaled by coordination. Only text and
+        // padding use that same scale here; never scale the HWND a second time.
+        let scale = badge.scale.clamp(0.4, 2.55);
+        // SAFETY: valid memory DC selected with a BGRA bitmap, valid bounds and
+        // thread-owned COM renderer. D2D supplies premultiplied per-pixel alpha.
+        unsafe {
+            let title = self.dwrite.CreateTextFormat(
                 w!("Segoe UI"),
                 None,
                 DWRITE_FONT_WEIGHT_SEMI_BOLD,
                 DWRITE_FONT_STYLE_NORMAL,
                 DWRITE_FONT_STRETCH_NORMAL,
-                17.0,
+                17.0 * scale,
                 w!("fr-FR"),
             )?;
-            let detail = dwrite.CreateTextFormat(
+            let detail = self.dwrite.CreateTextFormat(
                 w!("Segoe UI"),
                 None,
                 DWRITE_FONT_WEIGHT_NORMAL,
                 DWRITE_FONT_STYLE_NORMAL,
                 DWRITE_FONT_STRETCH_NORMAL,
-                12.0,
+                12.0 * scale,
                 w!("fr-FR"),
             )?;
             detail.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP)?;
-            Ok(Self {
-                target,
-                title,
-                detail,
-            })
-        }
-    }
-
-    fn paint(&self, window: HWND, badge: &Badge, bounds: Rect) -> Result<()> {
-        let dib = Dib::new(bounds.width, bounds.height)?;
-        // SAFETY: valid memory DC selected with a BGRA bitmap, valid bounds and
-        // thread-owned COM renderer. D2D supplies premultiplied per-pixel alpha.
-        unsafe {
             self.target.BindDC(
                 dib.dc,
                 &RECT {
@@ -1262,7 +1362,7 @@ impl BadgeRenderer {
                     r: 0.04,
                     g: 0.05,
                     b: 0.075,
-                    a: 0.94,
+                    a: 1.0,
                 },
                 None,
             )?;
@@ -1299,19 +1399,19 @@ impl BadgeRenderer {
                         right: bounds.width as f32,
                         bottom: bounds.height as f32,
                     },
-                    radiusX: 7.0,
-                    radiusY: 7.0,
+                    radiusX: 7.0 * scale,
+                    radiusY: 7.0 * scale,
                 },
                 &background,
             );
             self.target.DrawText(
                 &badge.title.encode_utf16().collect::<Vec<_>>(),
-                &self.title,
+                &title,
                 &D2D_RECT_F {
-                    left: 10.0,
-                    top: 5.0,
-                    right: bounds.width as f32 - 10.0,
-                    bottom: 29.0,
+                    left: 10.0 * scale,
+                    top: 5.0 * scale,
+                    right: bounds.width as f32 - 10.0 * scale,
+                    bottom: 29.0 * scale,
                 },
                 &heading,
                 D2D1_DRAW_TEXT_OPTIONS_CLIP,
@@ -1319,12 +1419,12 @@ impl BadgeRenderer {
             );
             self.target.DrawText(
                 &badge.detail.encode_utf16().collect::<Vec<_>>(),
-                &self.detail,
+                &detail,
                 &D2D_RECT_F {
-                    left: 10.0,
-                    top: 30.0,
-                    right: bounds.width as f32 - 10.0,
-                    bottom: bounds.height as f32 - 4.0,
+                    left: 10.0 * scale,
+                    top: 30.0 * scale,
+                    right: bounds.width as f32 - 10.0 * scale,
+                    bottom: bounds.height as f32 - 4.0 * scale,
                 },
                 &body,
                 D2D1_DRAW_TEXT_OPTIONS_CLIP,
@@ -1348,7 +1448,7 @@ impl BadgeRenderer {
                 Some(&BLENDFUNCTION {
                     BlendOp: AC_SRC_OVER as u8,
                     BlendFlags: 0,
-                    SourceConstantAlpha: 255,
+                    SourceConstantAlpha: ((u16::from(opacity) * 255 + 50) / 100) as u8,
                     AlphaFormat: AC_SRC_ALPHA as u8,
                 }),
                 ULW_ALPHA,
@@ -1543,18 +1643,19 @@ fn display_status(
 }
 
 pub fn run_overlay(
-    receiver: Receiver<Vec<Badge>>,
+    receiver: Receiver<super::OverlayFrame>,
     actions: Sender<UserAction>,
     stop: Arc<AtomicBool>,
     config_path: &std::path::Path,
     updates: crate::update::UpdateController,
 ) -> Result<()> {
-    let mut scan_interval_ms = crate::config::Config::load(config_path)?.scan_interval_ms;
+    let mut config = crate::config::Config::load(config_path)?;
+    let mut scan_interval_ms = config.scan_interval_ms;
     let mut settings_read = Instant::now();
     let _apartment = Apartment::new()?;
     let _dpi = DpiContext::new();
     // Shortcut conflicts must not prevent tray controls and passive rendering.
-    let hotkeys = Hotkeys::new();
+    let mut hotkeys = Hotkeys::new(&config.shortcuts);
     let instance = HINSTANCE(unsafe { GetModuleHandleW(None)? }.0);
     let window_class = WNDCLASSW {
         lpfnWndProc: Some(badge_proc),
@@ -1565,6 +1666,7 @@ pub fn run_overlay(
     let atom = unsafe { RegisterClassW(&window_class) };
     ensure!(atom != 0, "Impossible d'enregistrer la fenêtre overlay");
     let tray = Tray::new(instance)?;
+    let mut settings_window: Option<crate::settings::SettingsWindow> = None;
     let renderer = BadgeRenderer::new()?;
     let mut display = match DisplayPublisher::new() {
         Ok(display) => Some(display),
@@ -1582,14 +1684,41 @@ pub fn run_overlay(
     let mut redraw = false;
     while !stop.load(Ordering::Acquire) {
         if settings_read.elapsed() >= Duration::from_secs(2) {
-            if let Ok(config) = crate::config::Config::load(config_path) {
-                scan_interval_ms = config.scan_interval_ms;
+            if let Ok(next) = crate::config::Config::load(config_path) {
+                scan_interval_ms = next.scan_interval_ms;
+                if next.shortcuts != config.shortcuts {
+                    hotkeys.reload(&next.shortcuts);
+                }
+                if next.overlay_opacity != config.overlay_opacity {
+                    redraw = true;
+                }
+                config = next;
             }
             settings_read = Instant::now();
         }
         let mut message = MSG::default();
         // SAFETY: processes only this thread's queue; no messages sent to LoL.
         while unsafe { PeekMessageW(&mut message, None, 0, 0, PM_REMOVE) }.as_bool() {
+            if let Some(settings) = settings_window.as_mut() {
+                let handled = settings.process_message(&message);
+                if settings.take_saved() {
+                    // A save is observed immediately, not only by periodic reload.
+                    if let Ok(next) = crate::config::Config::load(config_path) {
+                        scan_interval_ms = next.scan_interval_ms;
+                        hotkeys.reload(&next.shortcuts);
+                        if next.overlay_opacity != config.overlay_opacity {
+                            redraw = true;
+                        }
+                        config = next;
+                    }
+                }
+                if !settings.is_open() {
+                    settings_window = None;
+                }
+                if handled {
+                    continue;
+                }
+            }
             if message.message == WM_QUIT {
                 stop.store(true, Ordering::Release);
                 break;
@@ -1599,8 +1728,14 @@ pub fn run_overlay(
                     let _ = unsafe { ShowWindow(window.0, SW_HIDE) };
                 }
                 showing = false;
-                if let Err(error) = tray.show_menu(&actions, &stop, config_path, &updates, &hotkeys)
-                {
+                if let Err(error) = tray.show_menu(
+                    &actions,
+                    &stop,
+                    config_path,
+                    &updates,
+                    &hotkeys,
+                    &mut settings_window,
+                ) {
                     eprintln!("Menu Mayhem Lens : {error:#}");
                 }
             } else if message.message == WM_HOTKEY {
@@ -1626,11 +1761,13 @@ pub fn run_overlay(
             match receiver.try_recv() {
                 Ok(next) => {
                     last_received = Some(Instant::now());
-                    if next != current {
-                        current = next;
+                    if next.badges != current {
+                        current = next.badges;
                         redraw = true;
                     }
-                    published_geometry = game_window().and_then(|hwnd| window_bounds(hwnd).ok());
+                    // Retain the capture's geometry, not the window geometry at
+                    // receipt: a resize can happen while OCR is still running.
+                    published_geometry = next.game_bounds;
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
@@ -1689,7 +1826,7 @@ pub fn run_overlay(
                         )
                     }?;
                     let window = BadgeWindow(hwnd);
-                    renderer.paint(hwnd, badge, rect)?;
+                    renderer.paint(hwnd, badge, rect, config.overlay_opacity)?;
                     windows.push(window);
                 }
                 redraw = false;
@@ -1727,8 +1864,8 @@ fn badges_fresh(now: Instant, received: Option<Instant>, scan_interval_ms: u64) 
 }
 
 fn safe_badge_bounds(rect: Rect, game: Rect) -> Rect {
-    let width = rect.width.clamp(180, 720).min(game.width);
-    let height = rect.height.clamp(58, 180).min(game.height);
+    let width = rect.width.clamp(1, game.width.max(1));
+    let height = rect.height.clamp(1, game.height.max(1));
     Rect {
         x: rect.x.clamp(game.x, game.x + game.width - width),
         y: rect.y.clamp(game.y, game.y + game.height - height),
@@ -1745,7 +1882,8 @@ mod tests {
     fn hotkey_conflicts_preserve_other_bindings_and_safe_warning_codes() {
         let conflict = 0x8007_0581_u32 as i32;
         let mut attempted = Vec::new();
-        let registrations = register_hotkeys_with(|id, key| {
+        let defaults = crate::config::ShortcutConfig::default();
+        let registrations = register_hotkeys_with(&defaults, |id, key| {
             attempted.push((id, key));
             if matches!(id, HOTKEY_SCAN | HOTKEY_SLOT_2) {
                 Err(conflict)
@@ -1764,11 +1902,11 @@ mod tests {
             registrations.unavailable,
             [
                 HotkeyWarning {
-                    shortcut: "Ctrl+Shift+M",
+                    shortcut: "Ctrl+Shift+M".into(),
                     error_code: "0x80070581".into(),
                 },
                 HotkeyWarning {
-                    shortcut: "Ctrl+Shift+2",
+                    shortcut: "Ctrl+Shift+2".into(),
                     error_code: "0x80070581".into(),
                 },
             ]
@@ -1780,7 +1918,7 @@ mod tests {
 
         // Even with no global bindings available, registration returns a usable
         // runtime state. No Windows hotkey API is invoked by either fake backend.
-        let unavailable = register_hotkeys_with(|_, _| Err(conflict));
+        let unavailable = register_hotkeys_with(&defaults, |_, _| Err(conflict));
         assert!(unavailable.registered.is_empty());
         assert_eq!(unavailable.unavailable.len(), 5);
     }

@@ -219,33 +219,37 @@ fn execute(mut args: Vec<String>) -> Result<()> {
 }
 
 fn configure(args: &[String], path: &std::path::Path) -> Result<()> {
-    let mut config = Config::load(path)?;
-    if let Some(command) = args.first().map(String::as_str) {
-        match command {
-            "language" if args.len() == 2 => config.language.clone_from(&args[1]),
-            "stage" if args.len() == 2 => {
-                config.offer_stage = if args[1] == "unknown" {
-                    None
-                } else {
-                    Some(args[1].parse()?)
+    let config = if let Some(command) = args.first().map(String::as_str) {
+        mayhem_lens::config::modify(path, |config| {
+            match command {
+                "language" if args.len() == 2 => config.language.clone_from(&args[1]),
+                "stage" if args.len() == 2 => {
+                    config.auto_stage = args[1] == "auto";
+                    config.offer_stage = if matches!(args[1].as_str(), "unknown" | "auto") {
+                        None
+                    } else {
+                        Some(args[1].parse()?)
+                    }
                 }
+                "selected" => {
+                    config.selected_augments = args[1..]
+                        .iter()
+                        .map(|s| s.parse())
+                        .collect::<std::result::Result<_, _>>()?
+                }
+                "reset" if args.len() == 1 => {
+                    config.selected_augments.clear();
+                    config.offer_stage = None;
+                }
+                _ => bail!(
+                    "Usage : config [language fr|en | stage 1..4|unknown|auto | selected <ID>... | reset]"
+                ),
             }
-            "selected" => {
-                config.selected_augments = args[1..]
-                    .iter()
-                    .map(|s| s.parse())
-                    .collect::<std::result::Result<_, _>>()?
-            }
-            "reset" if args.len() == 1 => {
-                config.selected_augments.clear();
-                config.offer_stage = None;
-            }
-            _ => bail!(
-                "Usage : config [language fr|en | stage 1..4|unknown | selected <ID>... | reset]"
-            ),
-        }
-        config.save(path)?;
-    }
+            Ok(())
+        })?
+    } else {
+        Config::load(path)?
+    };
     println!(
         "{}\n{}",
         path.display(),

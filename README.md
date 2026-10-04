@@ -2,7 +2,7 @@
 
 Overlay Windows léger pour afficher les tiers des augmentations de **League of Legends — ARAM Mayhem**, en fonction du champion joué.
 
-**État : version expérimentale 1.0.1.** Cache Mayhem, reconnaissance locale FR/EN, classement, conseils d'objets, overlay natif et mises à jour sont implémentés. La compilation et les tests métier sont séparés de la validation en jeu : focus, rendu, précision OCR, performances et application effective des mises à jour restent à vérifier sur Windows, avec l'utilisateur disponible. Le numéro de version ne signifie pas que ces validations sont achevées.
+**État : version expérimentale 1.1.0.** Cache Mayhem, reconnaissance locale FR/EN, classement, conseils d'objets, overlay natif et mises à jour sont implémentés. Cette version ajoute le calibrage adaptatif, les indications de confiance, la lecture d'un stade explicite, une fenêtre de réglages et le suivi des mises à jour. La compilation et les tests métier sont séparés de la validation en jeu : focus, rendu, précision OCR, performances et application effective des mises à jour restent à vérifier sur Windows, avec l'utilisateur disponible. Le numéro de version ne signifie pas que ces validations sont achevées.
 
 ## Objectif
 
@@ -19,10 +19,12 @@ Rust + bindings Microsoft `windows`, petites fenêtres Win32 transparentes, Dire
 - L'API locale en lecture identifie le joueur et filtre strictement `KIWI`. Les modes `ARAM`, `CHERRY` et `KIWI_JADE` sont exclus.
 - ARAMKit fournit les tiers **du champion**, leurs splits de choix et les routes de builds Mayhem. CommunityDragon fournit les noms FR/EN et le pool KIWI, au même patch.
 - Le téléchargement se fait au chargement de la partie. Le worker OCR utilise uniquement le snapshot en mémoire ; aucun appel fournisseur pendant un choix.
-- Trois titres distincts, alignés et suffisamment espacés sont nécessaires pour afficher les badges. Ambiguïté, Alt-Tab, changement de géométrie et lecture manquée retirent les badges.
-- La sélection précédente est confirmée par raccourci. Le stade est explicitement renseigné via le menu système ou les réglages ; il n'est pas déduit du niveau.
+- La capture commence par une zone centrale large, puis apprend la région de trois titres après deux retours cohérents. Perte de lecture, nouvelle partie ou changement de géométrie entraînent une redécouverte ; une recherche large périodique permet de retrouver une disposition déplacée.
+- Trois titres distincts, alignés et suffisamment espacés sont nécessaires. Les noms exacts sont indiqués ; les noms approchés doivent dépasser le seuil de similarité et rester stables sur deux lectures. Une lecture incertaine n'affiche aucun tier ni conseil d'objets et indique le raccourci de relecture. Cette similarité n'est pas une probabilité calibrée de réussite de l'OCR.
+- La sélection précédente est confirmée par raccourci. Un stade explicite FR/EN lu dans l'en-tête au-dessus des cartes est accepté après deux lectures cohérentes. Sans ordinal lisible, le stade reste inconnu ; le niveau et le nombre de choix enregistrés ne le remplacent pas. Le menu et la fenêtre de réglages permettent un override manuel. Les formats du vrai en-tête restent à vérifier en partie.
 - Les règles personnelles de synergie sont configurables et restent distinctes du tier. **Aucune base de combos mécaniques non vérifiés n'est embarquée.** Les associations objet × augmentation du fournisseur restent observationnelles.
-- Une vérification des releases GitHub démarre en arrière-plan au lancement. Le MSIX téléchargé est contrôlé par SHA-256 et identité de package, puis Windows vérifie sa signature et prépare son inscription différée. Le menu système permet aussi une recherche manuelle ; l'application ne demande aucun arrêt forcé.
+- Une vérification des releases GitHub démarre en arrière-plan au lancement. Le panneau de mises à jour affiche version active, cible, téléchargement, vérification et préparation. Un reçu local permet de confirmer la version réellement active après relance, même sans réseau. Le MSIX est contrôlé par SHA-256 et identité de package, puis Windows vérifie sa signature et prépare son inscription différée ; aucun arrêt forcé n'est demandé.
+- La fenêtre de réglages s'ouvre uniquement depuis le menu système : langue, scan, confiance, stade, objets, taille, opacité, décalage et raccourcis. Enregistrer applique les préférences sans perdre les choix faits depuis l'ouverture ; Annuler ne les modifie pas. Les conflits de raccourcis sont signalés et n'empêchent pas le démarrage.
 - Aucune télémétrie externe, conservation de captures, lecture mémoire du jeu, injection, clic automatique ni affichage de win rates d'augmentations.
 
 ## Documents
@@ -78,7 +80,7 @@ Vérifier l'âge du snapshot et son `processId` : un fichier ancien peut rester 
 cargo run --locked -- --help
 cargo run --locked -- sync 222
 cargo run --locked -- recommend Jinx "Goliath" "Jeweled Gauntlet"
-cargo run --locked -- config stage 2
+cargo run --locked -- config stage auto
 cargo run --locked -- config selected 1045
 cargo run --locked -- config language en
 cargo run --locked -- diagnose

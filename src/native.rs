@@ -7,7 +7,7 @@ use std::sync::{
     mpsc::{Receiver, Sender},
 };
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct Rect {
     pub x: i32,
     pub y: i32,
@@ -22,12 +22,28 @@ pub struct Observation {
     pub rect: Rect,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
+pub struct CaptureReading {
+    pub observations: Vec<Observation>,
+    pub game_bounds: Rect,
+    pub calibration: crate::calibration::CalibrationSnapshot,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct Badge {
     /// Desired badge bounds in physical screen pixels.
     pub rect: Rect,
     pub title: String,
     pub detail: String,
+    /// Font scale; the caller already scales the physical geometry.
+    pub scale: f32,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct OverlayFrame {
+    pub badges: Vec<Badge>,
+    /// Geometry of the capture that produced these badges; None clears display.
+    pub game_bounds: Option<Rect>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,6 +53,7 @@ pub enum UserAction {
     SelectSlot(u8),
     /// Explicit user declaration; None preserves an unknown stage.
     SetStage(Option<u8>),
+    SetAutoStage(bool),
 }
 
 #[cfg(windows)]
@@ -44,13 +61,14 @@ mod platform;
 
 #[cfg(windows)]
 pub use platform::{
-    InstanceGuard, acquire_single_instance, diagnostics, ensure_ready, game_window_visible,
-    invalidate_observations, observe_game, package_data_directory,
+    InstanceGuard, acquire_single_instance, calibrate_offers, diagnostics, ensure_ready,
+    game_window_visible, invalidate_observations, observe_game, package_data_directory,
+    reading_is_current, reset_calibration,
 };
 
 #[cfg(windows)]
 pub fn run_overlay(
-    receiver: Receiver<Vec<Badge>>,
+    receiver: Receiver<OverlayFrame>,
     actions: Sender<UserAction>,
     stop: Arc<AtomicBool>,
     config_path: &std::path::Path,
@@ -83,6 +101,17 @@ pub fn game_window_visible() -> bool {
 pub fn invalidate_observations() {}
 
 #[cfg(not(windows))]
+pub fn calibrate_offers(_: &[Rect]) {}
+
+#[cfg(not(windows))]
+pub fn reset_calibration() {}
+
+#[cfg(not(windows))]
+pub fn reading_is_current(_: Rect) -> bool {
+    false
+}
+
+#[cfg(not(windows))]
 pub struct InstanceGuard;
 
 #[cfg(not(windows))]
@@ -91,13 +120,13 @@ pub fn acquire_single_instance() -> anyhow::Result<InstanceGuard> {
 }
 
 #[cfg(not(windows))]
-pub fn observe_game(_: &str) -> anyhow::Result<Vec<Observation>> {
+pub fn observe_game(_: &str) -> anyhow::Result<CaptureReading> {
     anyhow::bail!("La capture native nécessite Windows.")
 }
 
 #[cfg(not(windows))]
 pub fn run_overlay(
-    _: Receiver<Vec<Badge>>,
+    _: Receiver<OverlayFrame>,
     _: Sender<UserAction>,
     _: Arc<AtomicBool>,
     _: &std::path::Path,

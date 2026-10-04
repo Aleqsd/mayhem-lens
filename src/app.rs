@@ -5,6 +5,7 @@ use crate::{
     domain, game,
     model::{Catalog, Snapshot, Tier},
     native::{self, Badge, Observation, Rect, UserAction},
+    recognition::{Offer, ReadingGate, ReadingQuality, StageReading, StageSource, StageTracker},
 };
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -25,13 +26,6 @@ struct Session {
     generation: u64,
     offline: bool,
     matcher: domain::AugmentMatcher,
-}
-
-#[derive(Clone)]
-struct Offer {
-    id: u32,
-    rect: Rect,
-    confidence: f32,
 }
 
 #[derive(Clone, Serialize)]
@@ -74,6 +68,9 @@ struct ScanStatus {
     capture_ocr_ms: Option<f64>,
     association_ms: Option<f64>,
     total_scan_ms: Option<f64>,
+    reading_quality: ReadingQuality,
+    offer_stage: StageReading,
+    calibration: Option<crate::calibration::CalibrationSnapshot>,
     error: Option<ScanError>,
 }
 
@@ -97,6 +94,9 @@ impl ScanStatus {
             capture_ocr_ms: None,
             association_ms: None,
             total_scan_ms: None,
+            reading_quality: ReadingQuality::Uncertain,
+            offer_stage: StageReading::resolve(None, false, None),
+            calibration: None,
             error: None,
         }
     }
@@ -114,6 +114,9 @@ impl ScanStatus {
         self.capture_ocr_ms = None;
         self.association_ms = None;
         self.total_scan_ms = None;
+        self.reading_quality = ReadingQuality::Uncertain;
+        self.offer_stage = StageReading::resolve(None, false, None);
+        self.calibration = None;
         self.error = None;
     }
 
@@ -480,7 +483,7 @@ fn scan_loop(
     stop: &AtomicBool,
     session: &RwLock<Option<Arc<Session>>>,
     status: &Mutex<String>,
-    sender: mpsc::Sender<Vec<Badge>>,
+    sender: mpsc::Sender<native::OverlayFrame>,
     actions: mpsc::Receiver<UserAction>,
     config_path: PathBuf,
 ) -> Result<()> {
@@ -492,11 +495,26 @@ fn scan_loop(
     let mut last_valid = Instant::now() - Duration::from_secs(10);
     let mut last_scan = Instant::now() - Duration::from_secs(10);
     let mut diagnostic = ScanStatus::new();
+    let mut reading_gate = ReadingGate::default();
+    let mut stage_tracker = StageTracker::default();
+    let mut reading_bounds = None;
     let mut diagnostic_writer = ScanStatusWriter::new(app_directory().join("scan-status.json"));
     while !stop.load(Ordering::Relaxed) {
         if last_read.elapsed() >= Duration::from_secs(2) {
             match Config::load(&config_path) {
-                Ok(settings) => config = settings,
+                Ok(settings) => {
+                    if config.language != settings.language
+                        || config.minimum_match_confidence != settings.minimum_match_confidence
+                        || config.auto_stage != settings.auto_stage
+                        || config.offer_stage != settings.offer_stage
+                    {
+                        reading_gate.reset();
+                        stage_tracker.reset();
+                        previous.clear();
+                        clear_badges(&sender);
+                    }
+                    config = settings;
+                }
                 Err(error) => write_status(status, "config-error", &error.to_string()),
             }
             last_read = Instant::now();
@@ -506,11 +524,29 @@ fn scan_loop(
             match action {
                 UserAction::ForceScan => {
                     native::invalidate_observations();
+                    reading_gate.reset();
+                    stage_tracker.reset();
+                    previous.clear();
+                    diagnostic.clear_reading("rescanning");
+                    clear_badges(&sender);
                     force = true;
                 }
                 UserAction::SetStage(stage) => {
-                    config.offer_stage = stage;
-                    config.save(&config_path)?;
+                    config = crate::config::modify(&config_path, |config| {
+                        config.offer_stage = stage;
+                        config.auto_stage = false;
+                        Ok(())
+                    })?;
+                    stage_tracker.reset();
+                    force = true;
+                }
+                UserAction::SetAutoStage(enabled) => {
+                    config = crate::config::modify(&config_path, |config| {
+                        config.auto_stage = enabled;
+                        config.offer_stage = None;
+                        Ok(())
+                    })?;
+                    stage_tracker.reset();
                     force = true;
                 }
                 UserAction::SelectSlot(slot) => {
@@ -518,6 +554,7 @@ fn scan_loop(
                     let ids: Vec<_> = previous.iter().map(|o| o.id).collect();
                     if last_valid.elapsed() < Duration::from_secs(2)
                         && native::game_window_visible()
+                        && reading_bounds.is_some_and(native::reading_is_current)
                         && session
                             .read()
                             .ok()
@@ -527,9 +564,16 @@ fn scan_loop(
                         && let Some(offer) = previous.get(slot.saturating_sub(1) as usize)
                         && config.selected_augments.len() < 5
                     {
-                        config.selected_augments.push(offer.id);
-                        config.offer_stage = None;
-                        config.save(&config_path)?;
+                        let id = offer.id;
+                        config = crate::config::modify(&config_path, |config| {
+                            if config.selected_augments.len() < 5 {
+                                config.selected_augments.push(id);
+                            }
+                            config.offer_stage = None;
+                            Ok(())
+                        })?;
+                        reading_gate.reset();
+                        stage_tracker.reset();
                         confirmed_cards = Some(ids);
                         // Selected count alone doesn't prove the offer stage.
                         write_status(
@@ -556,9 +600,15 @@ fn scan_loop(
                 generation = Some(active.generation);
                 previous.clear();
                 confirmed_cards = None;
-                config.selected_augments.clear();
-                config.offer_stage = None;
-                config.save(&config_path)?;
+                reading_gate.reset();
+                stage_tracker.reset();
+                native::reset_calibration();
+                reading_bounds = None;
+                config = crate::config::modify(&config_path, |config| {
+                    config.selected_augments.clear();
+                    config.offer_stage = None;
+                    Ok(())
+                })?;
             }
             let game_foreground = native::game_window_visible();
             diagnostic.game_foreground = game_foreground;
@@ -570,27 +620,87 @@ fn scan_loop(
                 diagnostic_writer.publish_if_due(&diagnostic, Instant::now());
                 let scan_started = Instant::now();
                 match native::observe_game(&config.language) {
-                    Ok(observations) => {
+                    Ok(reading) => {
+                        if reading_bounds != Some(reading.game_bounds) {
+                            reading_gate.reset();
+                            stage_tracker.reset();
+                            reading_bounds = Some(reading.game_bounds);
+                        }
+                        let observations = &reading.observations;
                         let capture_ocr = scan_started.elapsed();
                         let association_started = Instant::now();
-                        let (recognized, offers) = detect_offers(&observations, &active.matcher);
+                        let (recognized, offers) = detect_offers_in_bounds(
+                            observations,
+                            &active.matcher,
+                            Some(reading.game_bounds),
+                        );
+                        let quality = reading_gate.assess(&offers, config.minimum_match_confidence);
+                        let screen_stage = if quality != ReadingQuality::Uncertain {
+                            stage_tracker.observe(
+                                crate::recognition::screen_stage(
+                                    observations,
+                                    &offers,
+                                    reading.game_bounds,
+                                ),
+                                &offers,
+                            )
+                        } else {
+                            stage_tracker.reset();
+                            None
+                        };
+                        let stage = StageReading::resolve(
+                            config.offer_stage,
+                            config.auto_stage,
+                            screen_stage,
+                        );
+                        let mut effective_config = config.clone();
+                        effective_config.offer_stage = stage.stage;
+                        diagnostic.reading_quality = quality;
+                        diagnostic.offer_stage = stage;
+                        diagnostic.calibration = Some(reading.calibration);
                         let association = association_started.elapsed();
                         diagnostic.last_scan_at_unix_ms = Some(unix_ms());
                         diagnostic.observation_count = observations.len();
                         diagnostic.capture_ocr_ms = Some(capture_ocr.as_secs_f64() * 1_000.0);
                         diagnostic.association_ms = Some(association.as_secs_f64() * 1_000.0);
-                        diagnostic.record_titles(&active, &config, &recognized, &offers);
+                        diagnostic.record_titles(&active, &effective_config, &recognized, &offers);
                         diagnostic.badges_requested_count = 0;
                         let current_generation = session
                             .read()
                             .ok()
                             .and_then(|s| s.as_ref().map(|s| s.generation));
-                        if offers.len() == 3 && current_generation == Some(active.generation) {
+                        let current = current_generation == Some(active.generation)
+                            && native::reading_is_current(reading.game_bounds)
+                            && scan_started.elapsed()
+                                < Duration::from_millis(
+                                    config.scan_interval_ms.saturating_add(1500),
+                                );
+                        if current && quality != ReadingQuality::Uncertain {
+                            native::calibrate_offers(
+                                &offers.iter().map(|offer| offer.rect).collect::<Vec<_>>(),
+                            );
+                        } else {
+                            native::calibrate_offers(&[]);
+                        }
+                        if offers.len() == 3 && current && quality != ReadingQuality::Uncertain {
                             last_valid = Instant::now();
                             previous = offers;
-                            let badges = present(&active, &previous, &config);
+                            let badges = present(
+                                &active,
+                                &previous,
+                                &effective_config,
+                                quality,
+                                stage.source,
+                                reading.game_bounds,
+                            );
                             let badges_requested_count = badges.len();
-                            if sender.send(badges).is_err() {
+                            if sender
+                                .send(native::OverlayFrame {
+                                    badges,
+                                    game_bounds: Some(reading.game_bounds),
+                                })
+                                .is_err()
+                            {
                                 diagnostic.phase = "displayChannelClosed";
                                 diagnostic_writer.publish_if_due(&diagnostic, Instant::now());
                                 break;
@@ -599,10 +709,24 @@ fn scan_loop(
                         } else {
                             if current_generation != Some(active.generation) {
                                 diagnostic.phase = "sessionChanged";
+                            } else if !current {
+                                diagnostic.phase = "staleReading";
                             }
                             previous.clear();
-                            confirmed_cards = None;
-                            let _ = sender.send(Vec::new());
+                            if offers.len() == 3 && current {
+                                diagnostic.phase = "uncertainReading";
+                                let badges =
+                                    uncertainty_badges(&offers, &config, reading.game_bounds);
+                                diagnostic.badges_requested_count = badges.len();
+                                let _ = sender.send(native::OverlayFrame {
+                                    badges,
+                                    game_bounds: Some(reading.game_bounds),
+                                });
+                            } else {
+                                reading_gate.reset();
+                                stage_tracker.reset();
+                                clear_badges(&sender);
+                            }
                         }
                         diagnostic.total_scan_ms =
                             Some(scan_started.elapsed().as_secs_f64() * 1_000.0);
@@ -615,7 +739,10 @@ fn scan_loop(
                         diagnostic.total_scan_ms = diagnostic.capture_ocr_ms;
                         diagnostic.error = Some(safe_scan_error(&error));
                         previous.clear();
-                        let _ = sender.send(Vec::new());
+                        reading_gate.reset();
+                        stage_tracker.reset();
+                        native::calibrate_offers(&[]);
+                        clear_badges(&sender);
                         write_status(status, "ocr-error", &format!("{error:#}"));
                     }
                 }
@@ -623,7 +750,9 @@ fn scan_loop(
                 diagnostic.game_foreground = false;
                 diagnostic.clear_reading("pausedForeground");
                 previous.clear();
-                let _ = sender.send(Vec::new());
+                reading_gate.reset();
+                stage_tracker.reset();
+                clear_badges(&sender);
             }
         } else {
             diagnostic.champion_id = None;
@@ -631,7 +760,9 @@ fn scan_loop(
             diagnostic.clear_reading("waitingForSession");
             diagnostic.game_foreground = native::game_window_visible();
             previous.clear();
-            let _ = sender.send(Vec::new());
+            reading_gate.reset();
+            stage_tracker.reset();
+            clear_badges(&sender);
         }
         diagnostic_writer.publish_if_due(&diagnostic, Instant::now());
         sleep_stoppable(stop, Duration::from_millis(80));
@@ -639,13 +770,29 @@ fn scan_loop(
     diagnostic.clear_reading("stopped");
     diagnostic.game_foreground = false;
     diagnostic_writer.publish_if_due(&diagnostic, Instant::now());
-    let _ = sender.send(Vec::new());
+    clear_badges(&sender);
     Ok(())
 }
 
+fn clear_badges(sender: &mpsc::Sender<native::OverlayFrame>) {
+    let _ = sender.send(native::OverlayFrame {
+        badges: Vec::new(),
+        game_bounds: None,
+    });
+}
+
+#[cfg(test)]
 fn detect_offers(
     observations: &[Observation],
     matcher: &domain::AugmentMatcher,
+) -> (Vec<Offer>, Vec<Offer>) {
+    detect_offers_in_bounds(observations, matcher, None)
+}
+
+fn detect_offers_in_bounds(
+    observations: &[Observation],
+    matcher: &domain::AugmentMatcher,
+    bounds: Option<Rect>,
 ) -> (Vec<Offer>, Vec<Offer>) {
     let mut candidates: Vec<_> = observations
         .iter()
@@ -681,14 +828,111 @@ fn detect_offers(
         let gap_a = centers[1] - centers[0];
         let gap_b = centers[2] - centers[1];
         // Prevent a list of tooltips/body text from masquerading as three cards.
-        if gap_a >= 100 && gap_b >= 100 && (gap_a - gap_b).abs() < gap_a.max(gap_b) / 2 {
+        let minimum_gap = bounds.map_or(100, |bounds| (bounds.width / 20).max(16));
+        if gap_a >= minimum_gap
+            && gap_b >= minimum_gap
+            && (gap_a - gap_b).abs() < gap_a.max(gap_b) / 2
+            && bounds.is_none_or(|bounds| valid_card_layout(&row, bounds))
+        {
             return (candidates, row);
         }
     }
     (candidates, Vec::new())
 }
 
-fn present(session: &Session, offers: &[Offer], config: &Config) -> Vec<Badge> {
+fn valid_card_layout(offers: &[Offer], bounds: Rect) -> bool {
+    if offers.len() != 3 || bounds.width < 320 || bounds.height < 240 {
+        return false;
+    }
+    let mut centers = Vec::new();
+    for offer in offers {
+        let rect = offer.rect;
+        let right = i64::from(rect.x) + i64::from(rect.width);
+        let bottom = i64::from(rect.y) + i64::from(rect.height);
+        if rect.width <= 0
+            || rect.height <= 0
+            || i64::from(rect.x) < i64::from(bounds.x)
+            || i64::from(rect.y) < i64::from(bounds.y)
+            || right > i64::from(bounds.x) + i64::from(bounds.width)
+            || bottom > i64::from(bounds.y) + i64::from(bounds.height)
+            || i64::from(rect.width) > i64::from(bounds.width) * 2 / 5
+            || i64::from(rect.height) > i64::from(bounds.height) / 10
+        {
+            return false;
+        }
+        centers.push(i64::from(rect.x) + i64::from(rect.width) / 2);
+    }
+    let a = centers[1] - centers[0];
+    let b = centers[2] - centers[1];
+    let minimum = i64::from(bounds.width) * 12 / 100;
+    let maximum = i64::from(bounds.width) * 42 / 100;
+    !offers.windows(2).any(|pair| {
+        i64::from(pair[0].rect.x) + i64::from(pair[0].rect.width) >= i64::from(pair[1].rect.x)
+    }) && (minimum..=maximum).contains(&a)
+        && (minimum..=maximum).contains(&b)
+        && (a - b).abs() * 3 <= a.max(b)
+}
+
+fn badge_scale(bounds: Rect, config: &Config) -> f32 {
+    (bounds.width as f32 / 2560.0).clamp(0.55, 1.7) * config.overlay_scale
+}
+
+fn badge_rect(
+    anchor: Rect,
+    width: i32,
+    height: i32,
+    top: i32,
+    scale: f32,
+    config: &Config,
+) -> Rect {
+    Rect {
+        x: anchor
+            .x
+            .saturating_sub((8.0 * scale).round() as i32)
+            .saturating_add(config.overlay_offset_x),
+        y: anchor
+            .y
+            .saturating_sub((top as f32 * scale).round() as i32)
+            .saturating_add(config.overlay_offset_y),
+        width: (width as f32 * scale).round() as i32,
+        height: (height as f32 * scale).round() as i32,
+    }
+}
+
+fn uncertainty_badges(offers: &[Offer], config: &Config, bounds: Rect) -> Vec<Badge> {
+    let scale = badge_scale(bounds, config);
+    offers
+        .iter()
+        .map(|offer| Badge {
+            rect: badge_rect(offer.rect, 300, 110, 116, scale, config),
+            scale,
+            title: if config.language == "en" {
+                "?  Uncertain reading"
+            } else {
+                "?  Lecture incertaine"
+            }
+            .into(),
+            detail: if config.language == "en" {
+                format!("No tier displayed\n{} to scan again", config.shortcuts.scan)
+            } else {
+                format!("Aucun tier affiché\n{} pour relire", config.shortcuts.scan)
+            },
+        })
+        .collect()
+}
+
+fn present(
+    session: &Session,
+    offers: &[Offer],
+    config: &Config,
+    quality: ReadingQuality,
+    stage_source: StageSource,
+    bounds: Rect,
+) -> Vec<Badge> {
+    if quality == ReadingQuality::Uncertain {
+        return uncertainty_badges(offers, config, bounds);
+    }
+    let scale = badge_scale(bounds, config);
     let ids: Vec<_> = offers.iter().map(|o| o.id).collect();
     let mut recommended = domain::recommend_localized(
         &session.snapshot,
@@ -750,18 +994,25 @@ fn present(session: &Session, offers: &[Offer], config: &Config) -> Vec<Badge> {
             session.snapshot.dataset_date,
             if session.offline { " · cache" } else { "" }
         );
+        detail.push('\n');
+        detail.push_str(quality.label(&config.language));
+        if config.offer_stage.is_some() {
+            detail.push_str(match (stage_source, config.language == "en") {
+                (StageSource::Manual, true) => " · manual stage",
+                (StageSource::Manual, false) => " · choix manuel",
+                (StageSource::Screen, true) => " · stage read on screen",
+                (StageSource::Screen, false) => " · choix lu à l’écran",
+                _ => "",
+            });
+        }
         if let Some(synergy) = recommendation.synergies.first() {
             detail.push('\n');
             detail.push_str(synergy);
         }
         // Position above titles, keeping the game card available for pointer input.
         badges.push(Badge {
-            rect: Rect {
-                x: offer.rect.x - 8,
-                y: offer.rect.y - 116,
-                width: 300,
-                height: 110,
-            },
+            rect: badge_rect(offer.rect, 300, 110, 116, scale, config),
+            scale,
             title: format!("{}  {}", recommendation.tier, title),
             detail,
         });
@@ -795,12 +1046,8 @@ fn present(session: &Session, offers: &[Offer], config: &Config) -> Vec<Badge> {
                 })
                 .collect();
             badges.push(Badge {
-                rect: Rect {
-                    x: first.rect.x - 8,
-                    y: first.rect.y - 192,
-                    width: 660,
-                    height: 84,
-                },
+                rect: badge_rect(first.rect, 660, 84, 202, scale, config),
+                scale,
                 title: format!("{} : {}", build.label, names.join(" → ")),
                 detail: format!(
                     "{} · {} · données {}{}",
@@ -1012,6 +1259,148 @@ mod tests {
             observation("Cloud", 1500, 500),
         ];
         assert!(detect_offers(&offers, &matcher).1.is_empty());
+    }
+
+    #[test]
+    fn physical_layout_is_resolution_relative_and_rejects_tooltip_rows() {
+        for (width, height, origin) in [
+            (1280, 720, -1920),
+            (1920, 1080, 0),
+            (2560, 1440, 0),
+            (3840, 2160, 3840),
+        ] {
+            let bounds = Rect {
+                x: origin,
+                y: -50,
+                width,
+                height,
+            };
+            let offers: Vec<_> = (0..3)
+                .map(|i| Offer {
+                    id: i as u32 + 1,
+                    rect: Rect {
+                        x: origin + width * (20 + i * 25) / 100,
+                        y: height / 2 - 50,
+                        width: width / 10,
+                        height: height / 50,
+                    },
+                    confidence: 1.0,
+                })
+                .collect();
+            assert!(valid_card_layout(&offers, bounds));
+            let mut list = offers.clone();
+            list[1].rect.x = list[0].rect.x + width / 25;
+            list[2].rect.x = list[1].rect.x + width / 25;
+            assert!(!valid_card_layout(&list, bounds));
+            let mut clipped = offers.clone();
+            clipped[2].rect.x = origin + width;
+            assert!(!valid_card_layout(&clipped, bounds));
+            let mut overlapping = offers.clone();
+            overlapping[0].rect.width = width * 3 / 10;
+            assert!(!valid_card_layout(&overlapping, bounds));
+            let mut tall = offers.clone();
+            tall[1].rect.height = height / 8;
+            assert!(!valid_card_layout(&tall, bounds));
+        }
+    }
+
+    #[test]
+    fn uncertain_reading_never_exposes_tiers_builds_or_guessed_names() {
+        let catalog = catalog();
+        let active = Session {
+            matcher: domain::AugmentMatcher::new(&catalog),
+            catalog,
+            snapshot: Snapshot {
+                champion_id: 222,
+                patch: "synthetic".into(),
+                source: "Synthetic".into(),
+                dataset: "synthetic".into(),
+                dataset_date: String::new(),
+                fetched_at: String::new(),
+                augments: vec![crate::model::AugmentStat {
+                    id: 1,
+                    tier: Tier::S,
+                    rank: None,
+                    sample_count: None,
+                }],
+                stages: std::collections::BTreeMap::from([(
+                    2,
+                    vec![crate::model::AugmentStat {
+                        id: 1,
+                        tier: Tier::B,
+                        rank: None,
+                        sample_count: None,
+                    }],
+                )]),
+                builds: vec![crate::model::BuildRoute {
+                    purchase_order: vec![1, 2, 3],
+                    sample_count: None,
+                    starters: Vec::new(),
+                    boots: Vec::new(),
+                    later_items: Vec::new(),
+                }],
+                item_synergies: Vec::new(),
+            },
+            generation: 1,
+            offline: false,
+        };
+        let offers: Vec<_> = (0..3)
+            .map(|i| Offer {
+                id: i + 1,
+                rect: Rect {
+                    x: 500 + i as i32 * 600,
+                    y: 700,
+                    width: 200,
+                    height: 30,
+                },
+                confidence: 0.94,
+            })
+            .collect();
+        let mut config = Config::default();
+        let bounds = Rect {
+            x: 0,
+            y: 0,
+            width: 2560,
+            height: 1440,
+        };
+        let uncertain = present(
+            &active,
+            &offers,
+            &config,
+            ReadingQuality::Uncertain,
+            StageSource::Unknown,
+            bounds,
+        );
+        assert_eq!(uncertain.len(), 3);
+        for badge in uncertain {
+            assert!(badge.title.starts_with('?'));
+            assert!(!badge.title.contains("Spark"));
+            assert!(!badge.detail.contains("ARAMKit"));
+            assert!(badge.detail.contains("Ctrl+Shift+M"));
+        }
+        config.show_builds = false;
+        config.offer_stage = Some(2);
+        let exact = present(
+            &active,
+            &offers,
+            &config,
+            ReadingQuality::Exact,
+            StageSource::Screen,
+            bounds,
+        );
+        assert!(exact[0].title.starts_with("B  Spark"));
+        assert!(exact[0].detail.contains("choix lu à l’écran"));
+        config.offer_stage = None;
+        let unknown = present(
+            &active,
+            &offers,
+            &config,
+            ReadingQuality::Exact,
+            StageSource::Unknown,
+            bounds,
+        );
+        assert!(unknown[0].title.starts_with("S  Spark"));
+        assert!(unknown[0].detail.contains("choix inconnu"));
     }
 
     #[test]

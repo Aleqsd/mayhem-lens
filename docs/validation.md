@@ -1,6 +1,6 @@
 # Plan de validation
 
-## État du prototype 1.0.1
+## État du prototype 1.1.0
 
 Le code complet doit passer formatage, compilation, Clippy et tests sans lancer une fenêtre. Les tests métier utilisent des fixtures synthétiques. La validation locale du 4 octobre a également téléchargé les données Mayhem réelles de Jinx, Brand et Tahm Kench, vérifié la réutilisation du cache et lu les recommandations FR/EN avec un proxy HTTP invalide : la lecture depuis le cache ne dépend pas du fournisseur. Les 446 noms du catalogue FR/EN et leurs 446 variantes avec retour à la ligne sont associés au bon ID dans un test local sans capture.
 
@@ -13,6 +13,18 @@ Cette preuve n'inclut pas le rendu Windows, le passage des clics, le focus, la p
 La version 1.0.0 a passé localement 42 tests, le formatage, la compilation et Clippy sur toutes les cibles avec avertissements bloquants. Elle a ajouté les diagnostics de reconnaissance et d'affichage ; les tests couvrent aussi les conflits de raccourcis, la récupération d'un catalogue trop ancien et le rejet de données chargées pour une partie qui a changé. Son hébergement `.appinstaller` a ensuite présenté un type MIME incompatible avec le parcours prévu.
 
 La version 1.0.1 passe le formatage, la compilation, Clippy avec avertissements bloquants et **47 tests**. Un test supplémentaire est ignoré dans le pipeline ordinaire : exécuté séparément sur le MSIX signé 1.0.0.0 archivé, il valide réellement les bindings du lecteur Windows et le refus d'un nom, éditeur ou numéro de version différents. Cette lecture n'installe rien et ne vérifie pas la confiance de la signature. Le téléchargement est testé sur plusieurs blocs, avec lectures courtes, corruption et erreurs d'entrée/sortie. La confiance du certificat sur un autre PC et la prise d'effet d'une mise à jour au lancement suivant restent à valider. Aucune installation ni validation graphique n'a été effectuée pour cette fonctionnalité.
+
+## Améliorations 1.1.0 : contrôles sans fenêtre
+
+La validation locale passe le formatage, la compilation, Clippy sur toutes les cibles avec avertissements bloquants et **69 tests** (aucun échec, un test de fixture MSIX ignoré comme précédemment). Aucun de ces contrôles ne lance la fenêtre de réglages, la capture, l'overlay ou un déploiement Windows.
+
+Les fixtures synthétiques couvrent le calibrage à 720p, 1080p, 1440p et 4K, avec origine d'écran négative, changement de résolution, déplacement de colonnes et lecture manquée. Vérifier que la redécouverte rétablit une zone bornée, que le recadrage inclut l'en-tête et que la clé de réutilisation comprend ses offsets. La géométrie capturée doit être transmise au rendu ; un déplacement entre lecture et réception ne doit jamais réassocier les anciens badges à une nouvelle fenêtre.
+
+Tester les noms exacts, approchés et insuffisants : un changement de cartes remet la stabilité à zéro, et une lecture incertaine ne doit exposer aucun tier ni conseil d'objets. Tester les marqueurs de stade FR/EN uniquement au-dessus de trois cartes, les marqueurs contradictoires, la disparition de l'en-tête et les rerolls. Les fixtures de libellés ne prouvent pas que ces formats sont présents dans le client actuel ; observer les véritables en-têtes pendant le prochain test. Niveau, temps et nombre de choix enregistrés ne doivent jamais fournir un stade de secours.
+
+Tester la migration du JSON 1.0.1, les nombres invalides/NaN, les raccourcis équivalents en doublon et la sauvegarde de préférences pendant des changements de session. Les choix enregistrés et règles personnelles doivent être préservés ; un stade non édité ne doit pas rétablir un override devenu ancien. Tab, Maj+Tab, Entrée, Échap, combobox, erreurs de validation, page de mises à jour, DPI et rendu des textes restent à tester dans une vraie fenêtre avec l'utilisateur disponible.
+
+La progression de téléchargement doit rester monotone et bornée. Une corruption ne doit jamais produire un état prêt. Un reçu accepté est conservé ; une confirmation exige la version active exacte et doit rester visible hors ligne, y compris si l'enregistrement de la date de confirmation échoue. Ces tests ne préparent aucune mise à jour Windows.
 
 ## Mises à jour
 
