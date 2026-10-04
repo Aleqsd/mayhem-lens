@@ -1,6 +1,6 @@
 [package]
 name = "mayhem-lens"
-version = "1.2.0"
+version = "1.2.1"
 edition = "2024"
 publish = false
 default-run = "mayhem-lens"
@@ -18,10 +18,8 @@ unicode-normalization = "0.1"
 windows-future = "0.3.2"
 windows = { version = "0.62.2", features = [
   "Foundation", "ApplicationModel", "Management_Deployment", "System_Profile",
-  "Globalization", "Media_Ocr", "Graphics_Imaging", "Graphics_Capture",
-  "Graphics_DirectX", "Graphics_DirectX_Direct3D11", "Storage_Streams",
+  "Globalization", "Media_Ocr", "Graphics_Imaging", "Storage_Streams",
   "Win32_Foundation", "Win32_System_Com", "Win32_System_WinRT",
-  "Win32_System_WinRT_Graphics_Capture", "Win32_System_WinRT_Direct3D11",
   "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi",
   "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Gdi", "Win32_Graphics_DirectWrite",
   "Win32_Graphics_Direct2D", "Win32_Graphics_Direct2D_Common", "Win32_Graphics_Imaging",

@@ -247,7 +247,9 @@ fn safe_scan_error(error: &anyhow::Error) -> ScanError {
     // Persist only fixed context and a numeric HRESULT, never arbitrary error
     // strings that might contain paths, captured text or source response data.
     ScanError {
-        stage: "captureOcr",
+        stage: error
+            .downcast_ref::<native::CaptureStage>()
+            .map_or("captureOcr", |stage| stage.name()),
         message: "Capture ou OCR indisponible",
         windows_error_code: error.chain().find_map(|cause| {
             cause
@@ -697,6 +699,17 @@ fn scan_loop(
                                     config.scan_interval_ms.saturating_add(1500),
                                 );
                         scan_schedule.observe(offers.len() == 3 && current);
+                        if current {
+                            write_status(
+                                status,
+                                if active.offline {
+                                    "ready-offline"
+                                } else {
+                                    "ready"
+                                },
+                                "Capture DXGI disponible ; surveillance des augmentations Mayhem",
+                            );
+                        }
                         if current && quality != ReadingQuality::Uncertain {
                             native::calibrate_offers(
                                 &offers.iter().map(|offer| offer.rect).collect::<Vec<_>>(),
@@ -1539,5 +1552,24 @@ mod tests {
         assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
+    fn native_capture_error_context_survives_without_private_source_text() {
+        let error = anyhow::anyhow!("PrivatePlayer and screenshot.png")
+            .context(native::CaptureStage::DesktopCapture);
+        let value = serde_json::to_value(safe_scan_error(&error)).unwrap();
+        assert_eq!(value["stage"], "desktopCapture");
+        assert!(!value.to_string().contains("PrivatePlayer"));
+        let error = error.context(native::CaptureStage::Ocr);
+        assert_eq!(safe_scan_error(&error).stage, "ocr");
+        let error = anyhow::Error::from(windows::core::Error::from_hresult(
+            windows::core::HRESULT(0x8000_FFFF_u32 as i32),
+        ))
+        .context(native::CaptureStage::DesktopCapture);
+        assert_eq!(
+            safe_scan_error(&error).windows_error_code,
+            Some("8000FFFF".into())
+        );
     }
 }

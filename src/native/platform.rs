@@ -17,24 +17,14 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use windows::{
-    Foundation::TimeSpan,
     Globalization::Language,
-    Graphics::{
-        Capture::{
-            Direct3D11CaptureFrame, Direct3D11CaptureFramePool, GraphicsCaptureItem,
-            GraphicsCaptureSession,
-        },
-        DirectX::{Direct3D11::IDirect3DDevice, DirectXPixelFormat},
-        Imaging::{BitmapPixelFormat, SoftwareBitmap},
-        SizeInt32,
-    },
+    Graphics::Imaging::{BitmapPixelFormat, SoftwareBitmap},
     Media::Ocr::OcrEngine,
     Storage::Streams::Buffer,
     Win32::{
         Foundation::{
             COLORREF, CloseHandle, ERROR_ALREADY_EXISTS, ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS,
-            GetLastError, HANDLE, HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE,
-            WPARAM,
+            GetLastError, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
         },
         Graphics::{
             Direct2D::{
@@ -47,23 +37,13 @@ use windows::{
                 D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, D2D1CreateFactory, ID2D1DCRenderTarget,
                 ID2D1Factory,
             },
-            Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0},
-            Direct3D11::{
-                D3D11_BOX, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAP_READ,
-                D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
-                D3D11_USAGE_STAGING, D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext,
-                ID3D11Texture2D,
-            },
             DirectWrite::{
                 DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
                 DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD,
                 DWRITE_MEASURING_MODE_NATURAL, DWRITE_WORD_WRAPPING_WRAP, DWriteCreateFactory,
                 IDWriteFactory,
             },
-            Dxgi::{
-                Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC},
-                IDXGIDevice,
-            },
+            Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM,
             Gdi::{
                 AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
                 CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject,
@@ -76,11 +56,7 @@ use windows::{
         System::{
             LibraryLoader::GetModuleHandleW,
             Threading::CreateMutexW,
-            WinRT::{
-                Direct3D11::{CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess},
-                Graphics::Capture::IGraphicsCaptureItemInterop,
-                IBufferByteAccess, RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize,
-            },
+            WinRT::{IBufferByteAccess, RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize},
         },
         UI::{
             HiDpi::{
@@ -98,15 +74,16 @@ use windows::{
                 GetForegroundWindow, GetWindowRect, HMENU, IDI_INFORMATION, IsIconic,
                 IsWindowVisible, LoadIconW, MA_NOACTIVATE, MF_CHECKED, MF_GRAYED, MF_SEPARATOR,
                 MF_STRING, MSG, PM_REMOVE, PeekMessageW, PostMessageW, RegisterClassW, SW_HIDE,
-                SW_SHOW, SW_SHOWNOACTIVATE, SetForegroundWindow, ShowWindow, TPM_RETURNCMD,
-                TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, ULW_ALPHA, UpdateLayeredWindow,
-                WM_APP, WM_CONTEXTMENU, WM_HOTKEY, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_NULL,
-                WM_QUIT, WM_RBUTTONUP, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-                WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+                SW_SHOW, SW_SHOWNOACTIVATE, SetForegroundWindow, SetWindowDisplayAffinity,
+                ShowWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage,
+                ULW_ALPHA, UpdateLayeredWindow, WDA_EXCLUDEFROMCAPTURE, WM_APP, WM_CONTEXTMENU,
+                WM_HOTKEY, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_NULL, WM_QUIT, WM_RBUTTONUP,
+                WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+                WS_EX_TRANSPARENT, WS_POPUP,
             },
         },
     },
-    core::{BOOL, HSTRING, Interface, PWSTR, factory, w},
+    core::{BOOL, HSTRING, Interface, PWSTR, w},
 };
 
 const HOTKEY_SCAN: i32 = 1;
@@ -114,7 +91,6 @@ const HOTKEY_QUIT: i32 = 2;
 const HOTKEY_SLOT_1: i32 = 3;
 const HOTKEY_SLOT_2: i32 = 4;
 const HOTKEY_SLOT_3: i32 = 5;
-const FRAME_TIMEOUT: Duration = Duration::from_millis(750);
 const TRAY_MESSAGE: u32 = WM_APP + 32;
 const MENU_SCAN: u32 = 100;
 const MENU_STAGE_UNKNOWN: u32 = 110;
@@ -209,9 +185,8 @@ pub fn diagnostics() -> Result<String> {
         .map(|language| language.LanguageTag().map(|tag| tag.to_string()))
         .collect::<windows::core::Result<Vec<_>>>()?;
     Ok(format!(
-        "Identité MSIX présente. Langues OCR installées : {}. Capture WGC disponible : {}. Aucun overlay lancé.",
+        "Identité MSIX présente. Langues OCR installées : {}. Capture DXGI initialisée seulement en partie. Aucun overlay lancé.",
         languages.join(", "),
-        GraphicsCaptureSession::IsSupported()?
     ))
 }
 
@@ -223,10 +198,6 @@ pub fn ensure_environment_ready() -> Result<()> {
         "Windows OCR exige une identité de package. Installer le MSIX puis lancer l'application enregistrée ; l'EXE nu n'est pas une voie supportée."
     );
     let _apartment = Apartment::new()?;
-    ensure!(
-        GraphicsCaptureSession::IsSupported()?,
-        "Windows Graphics Capture indisponible"
-    );
     Ok(())
 }
 
@@ -339,6 +310,7 @@ pub fn reset_calibration() {
         if let Some(worker) = cell.borrow_mut().as_mut() {
             worker.calibration.reset();
             worker.invalidate();
+            worker.desktop = super::desktop_capture::DesktopCapture::new();
         }
     });
 }
@@ -373,27 +345,11 @@ pub fn observe_game(language: &str, force: bool, has_offers: bool) -> Result<Cap
     })
 }
 
-struct CaptureSource {
-    hwnd: HWND,
-    size: SizeInt32,
-    item: GraphicsCaptureItem,
-    pool: Direct3D11CaptureFramePool,
-}
-impl Drop for CaptureSource {
-    fn drop(&mut self) {
-        let _ = self.pool.Close();
-    }
-}
-
 struct CaptureWorker {
     language: String,
-    device: ID3D11Device,
-    context: ID3D11DeviceContext,
-    runtime_device: IDirect3DDevice,
     engines: Vec<OcrEngine>,
-    source: Option<CaptureSource>,
-    staging: Option<ID3D11Texture2D>,
-    staging_size: (u32, u32),
+    desktop: super::desktop_capture::DesktopCapture,
+    last_hwnd: Option<HWND>,
     last_signature: Option<(u64, Rect, Rect, usize, usize)>,
     last_observations: Vec<Observation>,
     regions: RegionOcrCache,
@@ -412,10 +368,6 @@ impl CaptureWorker {
             "Windows OCR exige une identité de package. Installer le MSIX puis lancer l'application enregistrée ; l'EXE nu n'est pas une voie supportée."
         );
         let apartment = Apartment::new()?;
-        ensure!(
-            GraphicsCaptureSession::IsSupported()?,
-            "Windows Graphics Capture indisponible"
-        );
         let requested = requested_languages(language)?;
         let mut engines = Vec::new();
         for tag in requested {
@@ -429,35 +381,11 @@ impl CaptureWorker {
             "Aucune langue OCR demandée n'est installée dans Windows ({}).",
             requested.join(", ")
         );
-        let mut device = None;
-        let mut context = None;
-        // SAFETY: OS D3D11 device creation writes owned COM references to valid locals.
-        unsafe {
-            D3D11CreateDevice(
-                None,
-                D3D_DRIVER_TYPE_HARDWARE,
-                HMODULE::default(),
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                Some(&[D3D_FEATURE_LEVEL_11_0]),
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                Some(&mut context),
-            )?;
-        }
-        let device = device.context("D3D11 n'a pas retourné de device")?;
-        let context = context.context("D3D11 n'a pas retourné de contexte")?;
-        let dxgi: IDXGIDevice = device.cast()?;
-        let runtime_device = unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi)? }.cast()?;
         Ok(Self {
             language: language.into(),
-            device,
-            context,
-            runtime_device,
             engines,
-            source: None,
-            staging: None,
-            staging_size: (0, 0),
+            desktop: super::desktop_capture::DesktopCapture::new(),
+            last_hwnd: None,
             last_signature: None,
             last_observations: Vec::new(),
             regions: RegionOcrCache::new(),
@@ -478,38 +406,15 @@ impl CaptureWorker {
     }
 
     fn observe(&mut self, hwnd: HWND, bounds: Rect, has_offers: bool) -> Result<CaptureReading> {
-        if self.last_bounds != Some(bounds) {
+        let _dpi = DpiContext::new();
+        if self.last_bounds != Some(bounds) || self.last_hwnd != Some(hwnd) {
             self.invalidate();
             self.calibration.reset();
+            self.desktop = super::desktop_capture::DesktopCapture::new();
             self.last_bounds = Some(bounds);
+            self.last_hwnd = Some(hwnd);
         }
         let mut calibration = self.calibration.next(bounds);
-        let interop: IGraphicsCaptureItemInterop =
-            factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()?;
-        // SAFETY: this targets only the visible game HWND identified above, never memory.
-        let item: GraphicsCaptureItem = unsafe { interop.CreateForWindow(hwnd)? };
-        let size = item.Size()?;
-        if self
-            .source
-            .as_ref()
-            .is_none_or(|source| source.hwnd != hwnd || source.size != size)
-        {
-            let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
-                &self.runtime_device,
-                DirectXPixelFormat::B8G8R8A8UIntNormalized,
-                1,
-                size,
-            )?;
-            self.source = Some(CaptureSource {
-                hwnd,
-                size,
-                item,
-                pool,
-            });
-            self.invalidate();
-            self.calibration.reset();
-            calibration = self.calibration.next(bounds);
-        }
         let regions = self.calibration.regions();
         let probe_due = full_probe_due(self.last_full_ocr, Instant::now(), regions.is_some());
         let full = self.force_next
@@ -520,28 +425,22 @@ impl CaptureWorker {
             calibration.roi = crate::calibration::discovery(bounds);
             calibration.mode = crate::calibration::CalibrationMode::PeriodicDiscovery;
         }
-        let source = self.source.as_ref().context("Source WGC absente")?;
-        // Drain leftovers before starting a fresh, short-lived session. No capture
-        // session is kept active between polls, during Alt-Tab, or after OCR.
-        while let Ok(frame) = source.pool.TryGetNextFrame() {
-            let _ = frame.Close();
-        }
-        ensure!(
-            unsafe { GetForegroundWindow() == hwnd } && window_bounds(hwnd)? == bounds,
-            "Le jeu a changé avant le démarrage de la capture"
-        );
-        let session = source.pool.CreateCaptureSession(&source.item)?;
-        let _ = session.SetIsCursorCaptureEnabled(false);
-        let _ = session.SetMinUpdateInterval(TimeSpan {
-            Duration: 1_000_000,
-        });
-        session.StartCapture()?;
-        let frame = next_frame(&source.pool);
-        let _ = session.Close();
-        let frame = frame?;
-        let image_result = self.copy_title_band(&frame, bounds, calibration.roi);
-        let _ = frame.Close();
-        let image = image_result?;
+        let frame = self
+            .desktop
+            .capture(bounds, calibration.roi)
+            .map_err(|error| error.context(super::CaptureStage::DesktopCapture))?;
+        let fresh_frame = frame.fresh_frame;
+        let image = CapturedBand {
+            pixels: frame.pixels,
+            left: frame.left,
+            top: frame.top,
+            width: frame.width,
+            height: frame.height,
+            source_width: frame.source_width,
+            source_height: frame.source_height,
+            frame_width: frame.frame_width,
+            frame_height: frame.frame_height,
+        };
         // Foreground and geometry are rechecked after capture to reject stale work.
         ensure!(
             unsafe { GetForegroundWindow() == hwnd } && window_bounds(hwnd)? == bounds,
@@ -549,11 +448,16 @@ impl CaptureWorker {
         );
         let gate = visual_gate::inspect(&image.pixels, image.width, image.height);
         let mut work = CaptureWork {
+            backend: "dxgi",
+            fresh_frame,
             visual_gate: gate,
             mode: "full",
             ocr_regions: 0,
             cached_regions: 0,
         };
+        // A healthy duplication timeout or pointer-only update can contain valid
+        // unchanged pixels. Frame novelty is diagnostic only: a static choice
+        // must retain its reading, while geometry/focus/source errors invalidate it.
         if !should_recognize(
             gate,
             regions.is_some() || has_offers,
@@ -606,7 +510,9 @@ impl CaptureWorker {
                     keys.push((index, image.crop(bounds, region)?.cache_key(region)));
                 }
             }
-            let result = self.recognize(image, bounds)?;
+            let result = self
+                .recognize(image, bounds)
+                .map_err(|error| error.context(super::CaptureStage::Ocr))?;
             // A broad probe can segment text better than a regional OCR. Replace
             // all old regional results with this current, complete-frame reading.
             self.regions.reset();
@@ -638,7 +544,9 @@ impl CaptureWorker {
                     work.cached_regions += 1;
                     cached.to_vec()
                 } else {
-                    let mut read = self.recognize(cropped, bounds)?;
+                    let mut read = self
+                        .recognize(cropped, bounds)
+                        .map_err(|error| error.context(super::CaptureStage::Ocr))?;
                     read.retain(|o| self.calibration.owns_observation(index, o.rect));
                     work.ocr_regions += 1;
                     self.regions.put(index, key, read.clone());
@@ -735,110 +643,6 @@ impl CaptureWorker {
         let _ = bitmap.Close();
         Ok(observations)
     }
-
-    fn copy_title_band(
-        &mut self,
-        frame: &Direct3D11CaptureFrame,
-        bounds: Rect,
-        roi: Rect,
-    ) -> Result<CapturedBand> {
-        let size = frame.ContentSize()?;
-        ensure!(
-            size.Width >= 320 && size.Height >= 240,
-            "Frame WGC trop petite"
-        );
-        // The learned ROI is in physical screen pixels. Project into WGC's frame
-        // separately: frame dimensions can differ from window bounds/DPI.
-        let frame_roi = crate::calibration::frame_region(bounds, roi, size.Width, size.Height)
-            .context("Zone OCR de calibrage invalide")?;
-        let left = frame_roi.x as u32;
-        let top = frame_roi.y as u32;
-        let width = frame_roi.width as u32;
-        let height = frame_roi.height as u32;
-        let access: IDirect3DDxgiInterfaceAccess = frame.Surface()?.cast()?;
-        // SAFETY: WGC's surface implements the documented DXGI access interop.
-        let texture: ID3D11Texture2D = unsafe { access.GetInterface()? };
-        let mut desc = D3D11_TEXTURE2D_DESC::default();
-        unsafe { texture.GetDesc(&mut desc) };
-        ensure!(
-            left + width <= desc.Width && top + height <= desc.Height,
-            "Zone OCR hors de la texture WGC"
-        );
-        if self.staging_size != (width, height) {
-            let staging_desc = D3D11_TEXTURE2D_DESC {
-                Width: width,
-                Height: height,
-                MipLevels: 1,
-                ArraySize: 1,
-                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                SampleDesc: DXGI_SAMPLE_DESC {
-                    Count: 1,
-                    Quality: 0,
-                },
-                Usage: D3D11_USAGE_STAGING,
-                BindFlags: 0,
-                CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
-                MiscFlags: 0,
-            };
-            let mut staging = None;
-            unsafe {
-                self.device
-                    .CreateTexture2D(&staging_desc, None, Some(&mut staging))
-            }?;
-            self.staging = staging;
-            self.staging_size = (width, height);
-        }
-        let staging = self
-            .staging
-            .as_ref()
-            .context("Texture de recadrage absente")?;
-        let source_box = D3D11_BOX {
-            left,
-            top,
-            front: 0,
-            right: left + width,
-            bottom: top + height,
-            back: 1,
-        };
-        let mut mapping = D3D11_MAPPED_SUBRESOURCE::default();
-        // SAFETY: validated box; both resources belong to this worker/device. Only
-        // this small ROI is read back, not the complete screen or game texture.
-        unsafe {
-            self.context
-                .CopySubresourceRegion(staging, 0, 0, 0, 0, &texture, 0, Some(&source_box));
-            self.context
-                .Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapping))?;
-        }
-        let stride = width as usize * 4;
-        let mut pixels = vec![0_u8; stride * height as usize];
-        // SAFETY: Map supplies at least RowPitch bytes for each of height rows,
-        // each row contains Width BGRA pixels, and the destination length matches.
-        unsafe {
-            for row in 0..height as usize {
-                ptr::copy_nonoverlapping(
-                    (mapping.pData as *const u8).add(row * mapping.RowPitch as usize),
-                    pixels.as_mut_ptr().add(row * stride),
-                    stride,
-                );
-            }
-            self.context.Unmap(staging, 0);
-        }
-        // Capture alpha is not useful to the OCR image; make it explicitly opaque.
-        for pixel in pixels.as_chunks_mut::<4>().0 {
-            pixel[3] = 255;
-        }
-        Ok(CapturedBand {
-            pixels,
-            left,
-            top,
-            width: width as usize,
-            height: height as usize,
-            source_width: width as usize,
-            source_height: height as usize,
-            frame_width: size.Width as usize,
-            frame_height: size.Height as usize,
-        })
-    }
 }
 
 fn union_rect(
@@ -889,20 +693,6 @@ fn add_wrapped_titles(observations: &mut Vec<Observation>) {
                 observations.push(joined);
             }
         }
-    }
-}
-
-fn next_frame(pool: &Direct3D11CaptureFramePool) -> Result<Direct3D11CaptureFrame> {
-    let deadline = Instant::now() + FRAME_TIMEOUT;
-    loop {
-        if let Ok(frame) = pool.TryGetNextFrame() {
-            return Ok(frame);
-        }
-        ensure!(
-            Instant::now() < deadline,
-            "Aucune frame WGC reçue dans le délai de capture"
-        );
-        thread::sleep(Duration::from_millis(4));
     }
 }
 
@@ -2033,6 +1823,10 @@ pub fn run_overlay(
                         )
                     }?;
                     let window = BadgeWindow(hwnd);
+                    // SAFETY: only our own top-level badge window is excluded.
+                    // DXGI must never feed the overlay's own text back to OCR.
+                    unsafe { SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE) }
+                        .context("Exclusion des badges de la capture DXGI")?;
                     renderer.paint(hwnd, badge, rect, config.overlay_opacity)?;
                     windows.push(window);
                 }

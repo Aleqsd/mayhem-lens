@@ -2,7 +2,7 @@
 
 Overlay Windows léger pour afficher les tiers des augmentations de **League of Legends — ARAM Mayhem**, en fonction du champion joué.
 
-**État : version expérimentale 1.2.0.** Cache Mayhem, reconnaissance locale FR/EN, classement, conseils d'objets, overlay natif et mises à jour sont implémentés. L'installateur natif contient le MSIX et son certificat public ; calibrage adaptatif, indications de confiance, stade explicite et réglages restent disponibles. La compilation et les tests métier sont séparés de la validation réelle de l'installation et du jeu : focus, rendu, précision OCR, performances et application effective des mises à jour restent à vérifier sur Windows, avec l'utilisateur disponible. Le numéro de version ne signifie pas que ces validations sont achevées.
+**État : version expérimentale 1.2.1.** Cache Mayhem, reconnaissance locale FR/EN, classement, conseils d'objets, overlay natif et mises à jour sont implémentés. L'installateur natif contient le MSIX et son certificat public ; calibrage adaptatif, indications de confiance, stade explicite et réglages restent disponibles. Le premier essai réel de la 1.2.0 a chargé les données du champion, mais n'a reconnu aucun groupe de trois offres ni affiché de badge. Des erreurs `0x8000FFFF` alternaient avec les lectures ; l'utilisateur a signalé un clignotement des bords et l'application a été arrêtée. La 1.2.1 remplace la capture WGC par Desktop Duplication ; ce correctif reste à valider en partie. Compilation et tests ne prouvent ni précision OCR, ni rendu, ni performances.
 
 ## Objectif
 
@@ -14,7 +14,7 @@ La source doit mesurer **Mayhem**. Les statistiques ARAM classiques et les class
 
 ## Implémentation
 
-Rust + bindings Microsoft `windows`, petites fenêtres Win32 transparentes, Direct2D/DirectWrite à la demande, capture Windows.Graphics.Capture et Windows OCR. L'application demande une identité MSIX et la fonctionnalité OCR de la langue choisie ; l'EXE non installé peut servir aux commandes de données, mais son lancement ne contourne pas cette exigence Windows.
+Rust + bindings Microsoft `windows`, petites fenêtres Win32 transparentes, Direct2D/DirectWrite à la demande, capture DXGI Desktop Duplication et Windows OCR. L'application demande une identité MSIX et la fonctionnalité OCR de la langue choisie ; l'EXE non installé peut servir aux commandes de données, mais son lancement ne contourne pas cette exigence Windows.
 
 - L'API locale en lecture identifie le joueur et filtre strictement `KIWI`. Les modes `ARAM`, `CHERRY` et `KIWI_JADE` sont exclus.
 - ARAMKit fournit les tiers **du champion**, leurs splits de choix et les routes de builds Mayhem. CommunityDragon fournit les noms FR/EN et le pool KIWI, au même patch.
@@ -29,7 +29,9 @@ Rust + bindings Microsoft `windows`, petites fenêtres Win32 transparentes, Dire
 
 ## Reconnaissance adaptative
 
-La capture est déclenchée aux polls, sur la fenêtre du jeu au premier plan ; la session WGC est fermée avant l'OCR et ne reste pas active entre deux polls. Quand trois offres sont reconnues, l'intervalle configuré est utilisé : **900 ms par défaut**, réglable de 400 à 5000 ms. Hors choix, l'intervalle est au moins **1500 ms**, sans accélérer une préférence utilisateur plus lente. Ces intervalles de surveillance ne sont pas une mesure de latence de reconnaissance.
+Le worker initialise Desktop Duplication à la première capture, sur l'adaptateur de l'écran contenant entièrement la fenêtre LoL. Aux polls, il acquiert une image desktop et copie uniquement la région OCR du GPU vers la mémoire CPU ; les images acquises sont libérées avant l'OCR. Le premier plan et la géométrie sont contrôlés, et la source est invalidée lors des changements de contexte. Aucune session WGC, bordure de capture ou demande de consentement WGC n'est utilisée dans ce chemin. Les fenêtres de badges sont exclues de la capture pour éviter de relire l'overlay lui-même. La cible reste le jeu sans bordure en SDR ; écran pivoté et fenêtre répartie entre plusieurs écrans sont refusés explicitement. Voir [l'architecture](docs/architecture.md#capture-et-reconnaissance) pour les limites.
+
+Quand trois offres sont reconnues, l'intervalle configuré est utilisé : **900 ms par défaut**, réglable de 400 à 5000 ms. Hors choix, l'intervalle est au moins **1500 ms**, sans accélérer une préférence utilisateur plus lente. Ces intervalles de surveillance ne sont pas une mesure de latence de reconnaissance.
 
 Le préfiltre échantillonne la région capturée et produit `candidate`, `uncertain` ou `absent`. `candidate` indique seulement des transitions de pixels pouvant évoquer trois titres alignés ; `absent` désigne une région échantillonnée presque uniforme. Aucun de ces états ne prouve la présence, l'absence ou l'identité d'une offre et ne fournit un tier. Sans région apprise ni offre active, un candidat déclenche l'OCR au poll courant ; les autres états conservent une lecture complète de secours, exigée lorsque **3 secondes** se sont écoulées depuis la dernière lecture complète. Les titres sombres, colorés ou mal échantillonnés peuvent donc encore être reconnus.
 
@@ -65,7 +67,7 @@ La CI Windows exécute ces contrôles et conserve le MSIX et le Setup non signé
 
 Après installation signée, ouvrir **Mayhem Lens** depuis Windows, ou utiliser l'alias `mayhem-lens.exe run`. Il attend une partie Mayhem ; l'icône système donne accès à la relecture, au stade, aux réglages et à l'arrêt.
 
-Pour installer la [dernière version](https://github.com/Aleqsd/mayhem-lens/releases/latest), télécharger `MayhemLens-Setup-1.2.0.exe`. L'interface native sombre demande un consentement explicite pour le certificat de développement ; son helper demande UAC seulement si cette confiance doit être ajoutée. Le package est installé pour l'utilisateur courant, puis **Lancer Mayhem Lens** ouvre l'application uniquement sur clic. Les écrans de sécurité Windows restent standards. Le [MSIX manuel](docs/installation.md#installation-manuelle-du-msix) reste disponible ; aucune association App Installer n'est requise.
+Pour installer la [dernière version](https://github.com/Aleqsd/mayhem-lens/releases/latest), télécharger `MayhemLens-Setup-1.2.1.exe`. L'interface native sombre demande un consentement explicite pour le certificat de développement ; son helper demande UAC seulement si cette confiance doit être ajoutée. Le package est installé pour l'utilisateur courant, puis **Lancer Mayhem Lens** ouvre l'application uniquement sur clic. Les écrans de sécurité Windows restent standards. Le [MSIX manuel](docs/installation.md#installation-manuelle-du-msix) reste disponible ; aucune association App Installer n'est requise.
 
 L'installateur signale une langue OCR manquante et n'ajoute pas silencieusement de fonctionnalités Windows. Le certificat est auto-signé et la distribution expérimentale. Une mise à jour préparée par l'application doit prendre effet après fermeture et relance ; sa version active reste à vérifier.
 
@@ -83,7 +85,7 @@ Si un autre logiciel réserve un raccourci, l'application continue à fonctionne
 
 Après lancement, des snapshots locaux remplacés au maximum une fois par seconde permettent un suivi en lecture seule dans le même dossier de données : `%LOCALAPPDATA%\Packages\<famille du package>\LocalState\MayhemLens` pour le MSIX, `%LOCALAPPDATA%\MayhemLens` pour l'exécutable seul. La famille installée commence par `Aleqsd.MayhemLens_`.
 
-- `scan-status.json` : champion/patch, premier plan du jeu, nombres de lignes OCR et de titres/offres reconnus, noms du catalogue, IDs, similarité et tiers, durées, erreurs et nombre de badges demandés. `captureWork` distingue le préfiltre seul (`visualOnly`), l'OCR complet (`full`), sa lecture réutilisée (`fullCache`) et les régions séparées (`regions`) ; `ocrRegions` et `cachedRegions` comptent le travail de la dernière capture. `scanIntervalMs` indique la cadence appliquée avant cette capture.
+- `scan-status.json` : champion/patch, premier plan du jeu, nombres de lignes OCR et de titres/offres reconnus, noms du catalogue, IDs, similarité et tiers, durées, erreurs et nombre de badges demandés. `captureWork.backend` indique `dxgi` ; `freshFrame` distingue une nouvelle présentation desktop d'une image inchangée valide. `captureWork` distingue le préfiltre seul (`visualOnly`), l'OCR complet (`full`), sa lecture réutilisée (`fullCache`) et les régions séparées (`regions`) ; `ocrRegions` et `cachedRegions` comptent le travail de la dernière capture. `scanIntervalMs` indique la cadence appliquée avant cette capture.
 - `display-status.json` : fenêtres natives demandées/visibles, positions, expiration, motif d'affichage ou de masquage et raccourcis indisponibles. La visibilité Win32 n'est pas une preuve des pixels vus par le joueur.
 
 Vérifier l'âge du snapshot et son `processId` : un fichier ancien peut rester après la fermeture. Les noms proviennent du catalogue, pas du texte OCR brut ; aucune capture ni identité de joueur n'est conservée. Ce dispositif prépare le prochain test ARAM Mayhem ; il n'est pas une preuve que le rendu ou les performances en partie ont déjà été validés. Voir [le protocole de suivi](docs/validation.md#suivi-local-du-prochain-test-aram-mayhem).

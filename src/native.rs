@@ -33,11 +33,34 @@ pub struct CaptureReading {
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CaptureWork {
+    pub backend: &'static str,
+    pub fresh_frame: bool,
     pub visual_gate: crate::visual_gate::VisualGate,
     pub mode: &'static str,
     pub ocr_regions: usize,
     pub cached_regions: usize,
 }
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum CaptureStage {
+    DesktopCapture,
+    Ocr,
+}
+
+impl CaptureStage {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::DesktopCapture => "desktopCapture",
+            Self::Ocr => "ocr",
+        }
+    }
+}
+impl std::fmt::Display for CaptureStage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+impl std::error::Error for CaptureStage {}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Badge {
@@ -66,6 +89,8 @@ pub enum UserAction {
     SetAutoStage(bool),
 }
 
+#[cfg(windows)]
+mod desktop_capture;
 #[cfg(windows)]
 mod platform;
 

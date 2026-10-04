@@ -1,6 +1,8 @@
 # Plan de validation
 
-## État du prototype 1.2.0
+## État du prototype 1.2.1
+
+La capture du code courant utilise DXGI Desktop Duplication en remplacement de WGC. Le correctif n'a pas encore été installé ou lancé pendant la partie de l'utilisateur ; il ne constitue pas une validation en jeu. Consigner les résultats de formatage, compilation, Clippy et tests de la 1.2.1 après le pipeline complet. Les décomptes ci-dessous décrivent leurs versions respectives.
 
 Le code complet doit passer formatage, compilation, Clippy et tests sans lancer une fenêtre. Les tests métier utilisent des fixtures synthétiques. La validation locale du 4 octobre a également téléchargé les données Mayhem réelles de Jinx, Brand et Tahm Kench, vérifié la réutilisation du cache et lu les recommandations FR/EN avec un proxy HTTP invalide : la lecture depuis le cache ne dépend pas du fournisseur. Les 446 noms du catalogue FR/EN et leurs 446 variantes avec retour à la ligne sont associés au bon ID dans un test local sans capture.
 
@@ -56,7 +58,25 @@ La validation locale passe le formatage, la compilation sur toutes les cibles, C
 
 Ils couvrent les indices visuels faibles ou absents, les échéances de secours, la relecture forcée, les transitions de cadence, l'invalidation indépendante des cartes et de l'en-tête, les changements de géométrie et les titres longs sur deux lignes. Les cellules couvrent aussi un remplacement central de 40 % de largeur, admis par l'association des offres. Un fragment voisin ou un titre décentré ne peut pas devenir une offre régionale : une nouvelle recherche globale doit rétablir la géométrie. Après une vraie lecture globale, les quatre caches repartent des observations globales courantes.
 
-Ces contrôles ne prouvent pas la précision OCR, la latence ni le coût CPU/GPU en partie. Le prochain test doit comparer les compteurs `ocrRegions`/`cachedRegions`, le temps de reconnaissance et les cartes réellement proposées, puis vérifier un reroll, la disparition du choix et Alt-Tab. Aucun logiciel n'a été installé, aucune confiance ajoutée et aucun contrôle d'écran effectué pour cette évolution.
+Ces contrôles ne prouvent pas la précision OCR, la latence ni le coût CPU/GPU en partie. Ils ont été exécutés sans installation, ajout de confiance ou contrôle d'écran. L'essai utilisateur effectué ensuite est consigné séparément ci-dessous.
+
+## Premier essai réel 1.2.0 — 4 octobre 2026
+
+L'utilisateur a installé et lancé la 1.2.0 puis rejoint une partie ARAM Mayhem. Le suivi autorisé a lu les diagnostics locaux, sans contrôle clavier/souris ni conservation de capture. Les données du champion ont été chargées et le jeu était au premier plan. Les diagnostics disponibles n'ont montré aucun groupe accepté de trois titres et aucun badge demandé ou visible ; l'utilisateur a confirmé ne pas avoir vu les lettres au premier choix.
+
+Les appels de reconnaissance alternaient avec des erreurs de capture/OCR portant `HRESULT 0x8000FFFF`. Ce diagnostic groupé de la 1.2.0 ne permet pas d'attribuer chaque erreur à l'acquisition WGC ou au moteur OCR. L'utilisateur a signalé un clignotement des bords de son écran ; Mayhem Lens a été arrêtée pour interrompre la capture, en laissant LoL actif. L'essai établit un échec du parcours attendu, sans établir la précision OCR des vraies cartes ni les performances de la chaîne.
+
+La 1.2.0 démarrait et fermait WGC à chaque poll. Le cadre associé à cette API constitue une explication cohérente du clignotement observé, à distinguer de la cause encore indéterminée du `0x8000FFFF`. La 1.2.1 remplace ce chemin par Desktop Duplication et distingue les étapes `desktopCapture` et `ocr` dans les erreurs, sans prétendre que le premier choix sera reconnu avant un nouvel essai.
+
+## Capture 1.2.1 : vérifications sans partie
+
+La validation locale passe le formatage, la compilation sur toutes les cibles, Clippy avec avertissements bloquants et **103 tests** (aucun échec, une fixture MSIX historique ignorée). Les nouveaux cas couvrent notamment le recadrage d'un choix statique lors des transitions de ROI, la séparation GPU/CPU, les coordonnées d'écrans et les contextes d'erreur. Aucun de ces contrôles n'initialise la capture GPU, ne lance l'overlay ni n'installe un package.
+
+Contrôler les projections physiques de ROI avec origine de moniteur négative et sans seconde mise à l'échelle DPI ; rejeter régions hors fenêtre, fenêtre répartie sur plusieurs moniteurs, dimensions invalides et écrans pivotés. Vérifier que le device appartient à l'adaptateur de la sortie choisie, que la texture indépendante sur le GPU couvre uniquement la fenêtre LoL et que seule la ROI est copiée vers la mémoire CPU. Chaque acquisition réussie doit être libérée même en cas d'erreur de validation ou de readback ; un mapping réussi doit être démappé sur tous les retours.
+
+Tester le cache en attente DXGI expirée : seules la même source et les mêmes fenêtre et géométrie peuvent réutiliser l'image GPU indépendante. Les transitions de ROI recherche large → région apprise → sonde doivent recadrer cette texture et fonctionner sur une offre statique, sans interpréter le buffer CPU d'une ancienne ROI comme la nouvelle. `freshFrame=false` décrit l'absence de nouvelle présentation ou une mise à jour du pointeur seule ; cela ne doit pas faire expirer les tiers d'une offre statique dont les pixels restent valides. Une perte de premier plan/session/fenêtre, une géométrie différente ou une source perdue interdit cette réutilisation. Les retours d'erreur doivent préserver la séparation des étapes de capture et OCR, sans texte brut du jeu.
+
+La prochaine validation, avec l'utilisateur disponible, doit confirmer l'absence de clignotement et de demande de consentement WGC, la lecture d'un premier choix, un reroll, une offre immobile plus longue que le délai d'expiration des badges et leur disparition après le choix. Vérifier que `WDA_EXCLUDEFROMCAPTURE` retire effectivement les propres badges de l'image source sans masquer/réafficher les fenêtres à chaque poll. Refaire les contrôles de focus, Alt-Tab et déplacement de fenêtre avant d'annoncer ce correctif validé en jeu. La cible initiale reste SDR et sans bordure ; HDR et plein écran exclusif ne sont pas validés.
 
 ## Mises à jour
 
@@ -87,7 +107,7 @@ Conserver pour cette validation les versions source/cible, le build Windows, l'a
 
 ### Suivi local du prochain test ARAM Mayhem
 
-Avec l'utilisateur disponible, lancer le package installé puis lui demander de rejoindre une partie ARAM Mayhem. Le suivi lit uniquement les fichiers locaux de l'application, sans déplacer le focus, envoyer de clavier/souris ou conserver une capture. Ce protocole n'a pas encore été exécuté en partie.
+Avec l'utilisateur disponible, lancer le package installé puis lui demander de rejoindre une partie ARAM Mayhem. Le suivi lit uniquement les fichiers locaux de l'application, sans déplacer le focus, envoyer de clavier/souris ou conserver une capture. Un premier suivi de la 1.2.0 a été exécuté et interrompu après l'incident décrit ci-dessus ; le protocole reste à répéter pour la capture DXGI de la 1.2.1.
 
 `scan-status.json` et `display-status.json` sont des snapshots écrasés au maximum une fois par seconde, avec `timestampUnixMs` et `processId`. Pour le MSIX, le dossier est `%LOCALAPPDATA%\Packages\<famille du package>\LocalState\MayhemLens`, avec une famille commençant par `Aleqsd.MayhemLens_`, stable entre versions. L'exécutable seul utilise `%LOCALAPPDATA%\MayhemLens`. Vérifier leur fraîcheur et l'existence du processus correspondant avant d'interpréter les valeurs ; ils peuvent rester sur disque après l'arrêt.
 
@@ -95,7 +115,7 @@ Le snapshot de scan distingue les observations OCR, les titres associés au cata
 
 `captureOcrMs` mesure l'appel de capture/OCR natif, qui peut réutiliser une reconnaissance en mémoire si le contenu n'a pas changé. `associationMs` mesure l'association et le regroupement spatial ; `totalScanMs` inclut aussi la préparation et l'envoi des badges. Ces valeurs concernent la dernière lecture terminée, datée par `lastScanAtUnixMs`. Une phase `scanning` et un horodatage qui cesse de progresser aident à repérer une opération bloquée ; ces durées ne mesurent pas les pixels effectivement affichés.
 
-`captureWork.visualGate` expose `candidate`, `uncertain` ou `absent`, sans fournir une probabilité OCR. `captureWork.mode` distingue `visualOnly`, `full`, `fullCache` et `regions` ; `captureWork.ocrRegions` compte les régions reconnues par OCR pendant cette capture, et `captureWork.cachedRegions` les lectures réutilisées. En mode `regions`, leur somme décrit l'en-tête et les trois cellules ; en mode `full`, une seule région large est relue. `scanIntervalMs` est l'intervalle appliqué avant la capture terminée et peut changer au scan suivant selon les offres reconnues. Interpréter ces compteurs avec le mode et la fraîcheur du snapshot, jamais comme une preuve de précision ou de rendu.
+`captureWork.backend` expose `dxgi`, et `captureWork.freshFrame` indique si une nouvelle image desktop a été présentée. Une valeur fausse peut accompagner des pixels inchangés valides ; elle ne mesure ni la fraîcheur du fichier de diagnostics ni la confiance OCR. `captureWork.visualGate` expose `candidate`, `uncertain` ou `absent`, sans fournir une probabilité OCR. `captureWork.mode` distingue `visualOnly`, `full`, `fullCache` et `regions` ; `captureWork.ocrRegions` compte les régions reconnues par OCR pendant cette capture, et `captureWork.cachedRegions` les lectures réutilisées. En mode `regions`, leur somme décrit l'en-tête et les trois cellules ; en mode `full`, une seule région large est relue. `scanIntervalMs` est l'intervalle appliqué avant la capture terminée et peut changer au scan suivant selon les offres reconnues. Interpréter ces compteurs avec le mode et la fraîcheur du snapshot, jamais comme une preuve de précision ou de rendu.
 
 Le snapshot de rendu est séparé : `visibleWindowCount`, les positions, `displayReason`, la géométrie du jeu et l'âge des derniers badges indiquent ce que les fenêtres Win32 déclarent. Comparer les badges demandés à ces fenêtres sans confondre visibilité native et rendu visible à l'écran, qui doit être confirmé par l'utilisateur.
 
