@@ -216,7 +216,7 @@ mod tests {
         for x in [170, 420, 680] {
             title(&mut pixels, width, x, 180, 2, 224);
         }
-        for bgra in pixels.chunks_exact_mut(4) {
+        for bgra in pixels.as_chunks_mut::<4>().0 {
             if bgra[0] == 224 {
                 bgra[..3].copy_from_slice(&[20, 50, 240]);
             }
