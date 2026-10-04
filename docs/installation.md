@@ -1,10 +1,10 @@
 # Installation Windows
 
-La version 1.0.0 est un prototype technique. Le script de packaging produit un MSIX non signé ; la signature de développement est une étape séparée. Ces scripts n'installent rien, ne modifient pas le magasin de certificats et ne lancent pas l'overlay.
+La version 1.0.1 est expérimentale. L'installation se fait en téléchargeant et ouvrant le MSIX signé. Le script de packaging produit un MSIX non signé ; la signature de développement est une étape séparée. Ces scripts n'installent rien, ne modifient pas le magasin de certificats et ne lancent pas l'overlay.
 
 ## Préparer
 
-Le package cible Windows 11 22H2 ou plus récent (build 22621). Pour le construire, utiliser Rust MSVC et un Windows SDK contenant `MakeAppx.exe`. Le minimum Windows du manifeste garantit la disponibilité de l'API retenue pour les mises à jour différées. La cible initiale de validation reste le jeu sans bordure et SDR ; le plein écran exclusif et HDR ne sont pas validés.
+Le package cible Windows 11 22H2 ou plus récent (build 22621). Pour le construire, utiliser Rust MSVC et un Windows SDK contenant `MakeAppx.exe`. La cible initiale de validation reste le jeu sans bordure et SDR ; le plein écran exclusif et HDR ne sont pas validés.
 
 ```powershell
 ./scripts/package.ps1
@@ -19,31 +19,41 @@ Un MSIX doit être signé par un certificat dont le sujet correspond exactement 
 `scripts/sign-development.ps1` peut préparer cette signature sans installer l'application ni modifier les magasins de certificats. Il crée une clé de développement sauvegardée chiffrée par DPAPI pour l'utilisateur Windows courant, signe le package et exporte uniquement le certificat public à partager. Le PFX temporaire est supprimé. Une signature ne vaut pas approbation du certificat sur la machine destinataire.
 
 ```powershell
-./scripts/sign-development.ps1 -PackagePath 'dist\MayhemLens_1.0.0.0_x64.msix' `
+./scripts/sign-development.ps1 -PackagePath 'dist\MayhemLens_1.0.1.0_x64.msix' `
   -SigningDirectory 'dist\private-signing' -PublicCertificatePath 'dist\MayhemLens-Development.cer'
 ```
 
 Le Windows SDK contient `SignTool.exe`. Exemple avec un certificat déjà présent et utilisable dans le magasin de l'utilisateur :
 
 ```powershell
-& '<Windows SDK>\x64\signtool.exe' sign /fd SHA256 /sha1 '<empreinte du certificat>' 'dist\MayhemLens_1.0.0.0_x64.msix'
+& '<Windows SDK>\x64\signtool.exe' sign /fd SHA256 /sha1 '<empreinte du certificat>' 'dist\MayhemLens_1.0.1.0_x64.msix'
 ```
 
 Ne pas committer ou partager la clé privée/PFX. Le fichier `.cer` distribué contient uniquement la clé publique. Un certificat de développement doit être approuvé dans le magasin de l'ordinateur `Trusted People` sur chaque PC de test ; cette étape demande les droits administrateur. [Documentation Microsoft sur les certificats de test](https://learn.microsoft.com/en-us/windows/uwp/packaging/create-certificate-package-signing).
 
 ## Installer depuis une release
 
-Les versions publiques sont disponibles dans les [releases GitHub](https://github.com/Aleqsd/mayhem-lens/releases). Télécharger le certificat public `MayhemLens-Development.cer`, établir sa confiance pour ce test, puis télécharger et ouvrir [MayhemLens.appinstaller](https://github.com/Aleqsd/mayhem-lens/releases/latest/download/MayhemLens.appinstaller). Windows installe le MSIX signé référencé et associe l'application à sa source de mises à jour.
+1. Ouvrir la [dernière release GitHub](https://github.com/Aleqsd/mayhem-lens/releases/latest) et télécharger `MayhemLens-Development.cer` ainsi que `MayhemLens_1.0.1.0_x64.msix` pour la version 1.0.1.
+2. Approuver le certificat public dans le magasin de l'ordinateur **Trusted People** (`LocalMachine\TrustedPeople`). Cette étape demande les droits administrateur. Depuis PowerShell ouvert en administrateur, dans le dossier du certificat :
 
-Ouvrir le `.appinstaller` est le parcours prévu pour conserver cette association. Installer seulement le MSIX brut permet une installation manuelle, mais ne garantit pas les vérifications natives de mises à jour de cette application. Le lien direct fonctionne sans le protocole `ms-appinstaller:`, désactivé par défaut sur les PC grand public. [Vue d'ensemble Microsoft](https://learn.microsoft.com/en-us/windows/msix/app-installer/app-installer-file-overview).
+   ```powershell
+   Import-Certificate -FilePath '.\MayhemLens-Development.cer' -CertStoreLocation 'Cert:\LocalMachine\TrustedPeople'
+   ```
+
+3. Ouvrir le fichier `.msix` téléchargé et choisir **Installer** dans Windows.
+4. Ouvrir **Mayhem Lens** depuis le menu Démarrer. Installer auparavant la fonctionnalité OCR de la langue configurée, comme indiqué ci-dessous.
+
+À partir de la version 1.0.1, le MSIX direct est le parcours prévu ; aucune association à un fichier `.appinstaller` n'est requise. La [signature MSIX et sa confiance sur le PC](https://learn.microsoft.com/en-us/windows/msix/package/signing-package-overview) restent vérifiées par Windows.
+
+Si la version 1.0.0 est déjà installée, ouvrir manuellement le MSIX 1.0.1 pour adopter ce mécanisme de mises à jour.
 
 Le code et les fichiers de release sont publics. Les clés privées, configurations personnelles, caches, captures et datasets tiers restent hors du dépôt et du package.
 
 ## Mises à jour
 
-L'application vérifie les mises à jour en arrière-plan au lancement. Le menu de l'icône système propose aussi « Rechercher / préparer une mise à jour ». Une version disponible est préparée par le gestionnaire de packages Windows avec une inscription différée pendant que l'application est ouverte : elle doit prendre effet au prochain lancement. La vérification et la préparation ne demandent pas l'arrêt forcé de l'overlay ou du jeu.
+L'application consulte la dernière release stable GitHub en arrière-plan au lancement. Le menu de l'icône système propose aussi « Rechercher / préparer une mise à jour ». Pour une version supérieure, elle télécharge le MSIX, vérifie sa taille, son digest SHA-256 et son identité de package, puis demande à Windows de vérifier sa signature et de préparer son inscription différée. La mise à jour doit prendre effet au prochain lancement.
 
-Le fichier `.appinstaller` demande aussi une vérification Windows à chaque lancement. Le contrôle effectué par l'application complète cette configuration, notamment pour les différents chemins de démarrage. Hors ligne, sans association App Installer ou en cas d'erreur, l'application continue à fonctionner et ne présente pas cet échec comme une preuve qu'elle est à jour.
+La préparation ne demande pas l'arrêt forcé de l'overlay ou du jeu, et aucun EXE n'est remplacé manuellement. Hors ligne, si GitHub est indisponible ou si un contrôle échoue, l'application continue avec sa version actuelle et ne présente pas cet échec comme une preuve qu'elle est à jour. Le certificat de développement doit rester approuvé pour que Windows accepte les versions suivantes.
 
 L'état est enregistré séparément dans `update-status.json`, dans le dossier de données décrit ci-dessous. Le libellé « Mise à jour préparée — prochain lancement » indique une préparation différée ; relancer normalement l'overlay permet de vérifier la version active. Deux commandes sont également disponibles depuis le package installé :
 
@@ -54,7 +64,7 @@ mayhem-lens.exe update check | Out-String
 mayhem-lens.exe update | Out-String
 ```
 
-La fonctionnalité est implémentée, mais l'installation par `.appinstaller` et l'application effective d'une mise à jour différée n'ont pas encore été validées sur un package installé. Voir [le fonctionnement et les sources](mises-a-jour.md) et [le plan de validation](validation.md).
+L'installation du MSIX publié sur un autre PC et l'application effective d'une mise à jour différée restent à valider sur un package installé. Les tests unitaires et la création du package ne constituent pas cette preuve. Voir [le fonctionnement et les sources](mises-a-jour.md) et [le plan de validation](validation.md).
 
 ## OCR et démarrage
 

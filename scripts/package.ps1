@@ -1,7 +1,5 @@
 param(
     [string]$OutputDirectory,
-    [string]$AppInstallerUri = 'https://github.com/Aleqsd/mayhem-lens/releases/latest/download/MayhemLens.appinstaller',
-    [string]$PackageUri,
     [switch]$SkipBuild
 )
 $ErrorActionPreference = 'Stop'
@@ -10,23 +8,11 @@ if (-not $OutputDirectory) { $OutputDirectory = Join-Path $repoDirectory 'dist' 
 $OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
 [xml]$manifest = Get-Content -LiteralPath (Join-Path $repoDirectory 'packaging\AppxManifest.xml') -Raw
 $packageVersion = [string]$manifest.Package.Identity.Version
-if ([Version]::Parse($packageVersion).Major -eq 0) {
-    throw 'Le schéma App Installer exige un numéro majeur non nul.'
-}
 $rustVersionMatch = [regex]::Match((Get-Content -LiteralPath (Join-Path $repoDirectory 'Cargo.toml') -Raw), '(?m)^version = "([0-9]+\.[0-9]+\.[0-9]+)"')
 if (-not $rustVersionMatch.Success -or $packageVersion -ne ($rustVersionMatch.Groups[1].Value + '.0')) {
     throw 'Les versions Cargo et MSIX doivent correspondre (major.minor.patch.0).'
 }
 $packageFileName = 'MayhemLens_' + $packageVersion + '_x64.msix'
-if (-not $PackageUri) {
-    $PackageUri = 'https://github.com/Aleqsd/mayhem-lens/releases/download/v' + $rustVersionMatch.Groups[1].Value + '/' + $packageFileName
-}
-foreach ($updateUri in @($AppInstallerUri, $PackageUri)) {
-    $validatedUri = [Uri]::new($updateUri, [UriKind]::Absolute)
-    if ($validatedUri.Scheme -ne 'https' -or $validatedUri.UserInfo -or $validatedUri.Fragment) {
-        throw 'Les adresses de distribution doivent être HTTPS sans identifiants ni fragment.'
-    }
-}
 $stagingName = '.package-staging-' + [Guid]::NewGuid().ToString('N')
 $packageDirectory = [IO.Path]::GetFullPath((Join-Path $OutputDirectory $stagingName))
 New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
@@ -106,18 +92,6 @@ try {
         Get-Content -LiteralPath $packLog -Tail 20
         throw 'Validation ou création du MSIX échouée.'
     }
-    [xml]$appInstaller = Get-Content -LiteralPath (Join-Path $repoDirectory 'packaging\MayhemLens.appinstaller') -Raw
-    $appInstaller.AppInstaller.SetAttribute('Version', $packageVersion)
-    $appInstaller.AppInstaller.SetAttribute('Uri', $AppInstallerUri)
-    foreach ($attribute in @('Name', 'Publisher', 'Version', 'ProcessorArchitecture')) {
-        $appInstaller.AppInstaller.MainPackage.SetAttribute($attribute, [string]$manifest.Package.Identity.GetAttribute($attribute))
-    }
-    $appInstaller.AppInstaller.MainPackage.SetAttribute('Uri', $PackageUri)
-    $writerSettings = [Xml.XmlWriterSettings]::new()
-    $writerSettings.Encoding = [Text.UTF8Encoding]::new($false)
-    $writerSettings.Indent = $true
-    $writer = [Xml.XmlWriter]::Create((Join-Path $OutputDirectory 'MayhemLens.appinstaller'), $writerSettings)
-    try { $appInstaller.Save($writer) } finally { $writer.Dispose() }
     Get-FileHash -LiteralPath $packagePath -Algorithm SHA256 | Format-List
     Write-Output 'Package non signé créé. Aucune installation, aucun certificat approuvé, aucun overlay lancé.'
 } finally {

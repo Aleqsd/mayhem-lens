@@ -21,6 +21,7 @@ Un seul processus coordonne une boucle de messages Windows, un worker de donnée
 | Builds | Présenter les routes et objets Mayhem disponibles pour le champion, avec leurs options et associations objet × augmentation. |
 | Overlay | Positionner les badges, laisser passer les clics, préserver le focus et ne redessiner qu'à la demande. |
 | Application | Barre système, réglages, raccourci, diagnostics et cycle de vie. |
+| Mises à jour | Lire la release GitHub stable, télécharger et contrôler le MSIX, puis demander sa préparation différée à Windows. |
 
 Ces responsabilités ne prescrivent pas autant de crates. Garder une organisation proportionnée à un petit produit.
 
@@ -47,6 +48,10 @@ Clé de données minimale : source, patch, champion, augmentation ; stade option
 Les données du champion sont téléchargées au début de la partie, puis conservées en cache. Le réseau reste hors du parcours de choix. En cas d'échec, utiliser un cache compatible selon la politique retenue, ou indiquer l'indisponibilité. Un résultat absent ou incertain n'est jamais converti arbitrairement en mauvais tier.
 
 Les captures sont traitées localement. Télémétrie, collecte de parties et conservation de screenshots ne font pas partie du périmètre demandé.
+
+## Mises à jour
+
+Un worker dédié consulte l'API GitHub publique au lancement et sur demande depuis l'icône système. Il sélectionne un MSIX x64 de version supérieure, vérifie son digest SHA-256 obligatoire et son identité native, puis transmet son chemin local au gestionnaire de packages Windows. Windows vérifie la confiance de la signature et reporte l'inscription lorsque le package est utilisé. Aucun remplacement manuel de l'EXE, arrêt forcé ou redémarrage du jeu n'est demandé. Aucune association App Installer n'est requise ; voir [le fonctionnement et les limites](mises-a-jour.md).
 
 ## Configuration retenue pour le prototype
 

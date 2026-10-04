@@ -1,39 +1,43 @@
 # Plan de validation
 
-## État du prototype 1.0.0
+## État du prototype 1.0.1
 
-Le code complet doit passer formatage, compilation, Clippy et tests sans lancer une fenêtre. Les tests métier utilisent des fixtures synthétiques. La validation locale du 4 octobre a également téléchargé les données Mayhem réelles de Jinx, vérifié la réutilisation du cache et lu les recommandations FR/EN avec un proxy HTTP invalide : la lecture depuis le cache ne dépend pas du fournisseur.
+Le code complet doit passer formatage, compilation, Clippy et tests sans lancer une fenêtre. Les tests métier utilisent des fixtures synthétiques. La validation locale du 4 octobre a également téléchargé les données Mayhem réelles de Jinx, Brand et Tahm Kench, vérifié la réutilisation du cache et lu les recommandations FR/EN avec un proxy HTTP invalide : la lecture depuis le cache ne dépend pas du fournisseur. Les 446 noms du catalogue FR/EN et leurs 446 variantes avec retour à la ligne sont associés au bon ID dans un test local sans capture.
 
 Le mode `KIWI` a été observé dans l'API locale pendant une partie, par une requête en lecture seule. MakeAppx valide le manifeste et la construction du package. Une signature de développement prépare l'installation ; elle ne vaut pas installation ou confiance du certificat.
 
-La validation initiale de la version 0.1.0 comprend 30 tests couvrant notamment la séparation des tiers global/champion/stade, le filtrage du pool KIWI, l'identité du joueur, les titres FR/EN ambigus, les doublons spatiaux, les règles personnelles et l'expiration de badges si l'OCR se bloque. Formatage, Clippy avec avertissements bloquants et compilation release passent sur cette version. L'import PE vérifié utilise seulement des bibliothèques système Windows, avec le runtime C lié statiquement. Ce décompte est historique ; les contrôles de la version 1.0.0 doivent également inclure le module de mises à jour.
+La validation initiale de la version 0.1.0 comprend 30 tests couvrant notamment la séparation des tiers global/champion/stade, le filtrage du pool KIWI, l'identité du joueur, les titres FR/EN ambigus, les doublons spatiaux, les règles personnelles et l'expiration de badges si l'OCR se bloque. Formatage, Clippy avec avertissements bloquants et compilation release passent sur cette version. L'import PE vérifié utilise seulement des bibliothèques système Windows, avec le runtime C lié statiquement. Ce décompte est historique ; les contrôles de la version courante couvrent également le module de mises à jour.
 
 Cette preuve n'inclut pas le rendu Windows, le passage des clics, le focus, la précision OCR ou les ressources consommées en partie. Ces validations attendent la disponibilité de l'utilisateur : aucun contrôle clavier/souris, lancement d'overlay ou installation pendant son jeu.
 
-La version 1.0.0 passe localement 42 tests, le formatage, la compilation et Clippy sur toutes les cibles avec avertissements bloquants. Elle ajoute la vérification de mises à jour au lancement et dans le menu, ainsi que les diagnostics de reconnaissance et d'affichage. Les tests couvrent aussi les conflits de raccourcis, la récupération d'un catalogue trop ancien et le rejet de données chargées pour une partie qui a changé. L'installation par `.appinstaller`, la confiance du certificat sur un autre PC et la prise d'effet au lancement suivant ne sont pas validées par une compilation, des tests unitaires ou la création du MSIX. Aucune installation ni validation graphique n'a été effectuée pour cette fonctionnalité.
+La version 1.0.0 a passé localement 42 tests, le formatage, la compilation et Clippy sur toutes les cibles avec avertissements bloquants. Elle a ajouté les diagnostics de reconnaissance et d'affichage ; les tests couvrent aussi les conflits de raccourcis, la récupération d'un catalogue trop ancien et le rejet de données chargées pour une partie qui a changé. Son hébergement `.appinstaller` a ensuite présenté un type MIME incompatible avec le parcours prévu.
+
+La version 1.0.1 passe le formatage, la compilation, Clippy avec avertissements bloquants et **47 tests**. Un test supplémentaire est ignoré dans le pipeline ordinaire : exécuté séparément sur le MSIX signé 1.0.0.0 archivé, il valide réellement les bindings du lecteur Windows et le refus d'un nom, éditeur ou numéro de version différents. Cette lecture n'installe rien et ne vérifie pas la confiance de la signature. Le téléchargement est testé sur plusieurs blocs, avec lectures courtes, corruption et erreurs d'entrée/sortie. La confiance du certificat sur un autre PC et la prise d'effet d'une mise à jour au lancement suivant restent à valider. Aucune installation ni validation graphique n'a été effectuée pour cette fonctionnalité.
 
 ## Mises à jour
 
 ### Contrôles sans installation
 
-Vérifier que le manifeste et le `.appinstaller` généré portent la même identité `Aleqsd.MayhemLens`, le même publisher, la même architecture x64 et la même version à quatre nombres. Le manifeste exige Windows 11 build 22621 minimum. Le `.appinstaller` utilise une URL HTTPS stable pour sa propre source et une URL de MSIX épinglée à la release ; sa version et celle du package doivent progresser à chaque nouvelle publication.
+Vérifier la cohérence de la version Cargo, du tag de release, du nom de l'asset et de l'identité du manifeste : `Aleqsd.MayhemLens`, publisher `CN=Alexandre DO-O ALMEIDA`, architecture x64, version à quatre nombres. Le manifeste exige Windows 11 build 22621 minimum. Le MSIX généré n'est pas signé avant l'étape dédiée ; aucun fichier `.appinstaller` n'est nécessaire.
 
-Les tests locaux doivent couvrir les résultats « disponible », « aucune mise à jour », « inconnu » et les erreurs, sans appel de déploiement réel. Vérifier également l'absence d'association App Installer, le refus d'une URL hors du canal attendu et l'absence de faux résultat « à jour » lorsque la vérification a échoué. L'erreur du module de mises à jour ne doit pas empêcher l'overlay de fonctionner.
+Les tests locaux doivent couvrir les métadonnées de release stable, la sélection d'une version supérieure et les cas sans mise à jour, sans téléchargement ni déploiement réels. Refuser brouillons, préversions, tags ou noms d'asset invalides, absence de digest SHA-256, tailles invalides, URL hors du dépôt/tag attendu et redirections non autorisées. Vérifier les échecs réseau, dont la limite d'API GitHub, et l'absence de faux résultat « à jour » lorsque la vérification échoue. L'erreur du module de mises à jour ne doit pas empêcher l'overlay de fonctionner.
+
+Tester séparément le calcul du hash, le refus d'un fichier tronqué ou modifié et la validation native de l'identité d'un MSIX de test. Le téléchargement est borné à 128 Mio, doit correspondre à la taille annoncée et au digest obligatoire ; il accepte seulement des redirections HTTPS vers les hôtes GitHub autorisés. Ces tests ne doivent pas appeler le déploiement Windows.
 
 Relire les options du déploiement : `DeferRegistrationWhenPackagesAreInUse=true`, `AllowUnsigned=false`, `ForceAppShutdown=false` et `ForceTargetAppShutdown=false`. Un déploiement préparé n'est pas une preuve que le processus actif exécute la nouvelle version.
 
-Après publication, vérifier sans identifiants que les URL de la source et du MSIX sont accessibles, que les téléchargements correspondent aux fichiers signés et que l'hébergement fournit les types de contenu, longueurs et requêtes par plages nécessaires à App Installer. Ces contrôles réseau ne prouvent pas l'installation Windows.
+Après publication, lire l'API GitHub sans identifiants et vérifier la release stable, la présence du MSIX exact, son URL, sa taille et son digest `sha256:…`. Vérifier que le téléchargement correspond au MSIX signé publié. Un téléchargement en `application/octet-stream` convient à ce parcours local ; ces contrôles réseau ne prouvent pas l'installation Windows.
 
 ### Validation native à effectuer avec l'utilisateur disponible
 
-1. Installer une première version signée en ouvrant son `.appinstaller`, puis vérifier l'identité et l'association App Installer du package installé. Tester séparément une installation depuis un MSIX brut : la vérification seule doit signaler l'absence d'association et le chemin de préparation doit tenter l'association au canal stable.
+1. Approuver le certificat public de développement dans `LocalMachine\TrustedPeople`, puis télécharger et ouvrir le MSIX signé d'une première version utilisant ce mécanisme (1.0.1 ou ultérieure). Vérifier l'identité du package installé et son démarrage depuis **Mayhem Lens**. Aucune association App Installer n'est nécessaire.
 2. Publier une version supérieure sur le même canal avec la même identité de package et un certificat approuvé. Lancer la première version et vérifier que le contrôle en arrière-plan ne bloque pas l'affichage ni le focus.
 3. Vérifier la préparation de la mise à jour pendant que l'application reste ouverte : le processus conserve son identité/version active, les badges restent disponibles et aucun processus du jeu n'est arrêté.
 4. Quitter normalement Mayhem Lens, le relancer et vérifier `Package.Id.Version` ainsi que la conservation des réglages et du cache. Le statut doit refléter cette version réellement active.
 5. Répéter par le menu de vérification manuelle, en incluant les cas sans mise à jour et réseau indisponible. Tester les lancements par le menu Démarrer, l'alias, un raccourci et la barre des tâches.
-6. Vérifier le refus d'un package à signature non approuvée, d'une identité/publisher différents et d'une version inférieure. Après un échec, l'ancienne version doit rester utilisable.
+6. Vérifier le refus d'un asset à digest absent, d'un fichier tronqué ou modifié, d'une identité/publisher/architecture différents, d'une version inférieure et d'une signature non approuvée. Après un échec, l'ancienne version doit rester utilisable.
 
-Conserver pour cette validation les versions source/cible, le build Windows, la version d'App Installer et les résultats de déploiement. Ne pas annoncer une mise à jour installée ou silencieuse en partie avant ces observations. Les [sources et limites des API](mises-a-jour.md) précisent la différence entre préparation différée et version active.
+Conserver pour cette validation les versions source/cible, le build Windows, l'asset/digest vérifié et les résultats de déploiement. Ne pas annoncer une mise à jour installée ou silencieuse en partie avant ces observations. Les [sources et limites des API](mises-a-jour.md) précisent la différence entre préparation différée et version active.
 
 ## Première preuve technique
 

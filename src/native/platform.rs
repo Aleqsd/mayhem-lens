@@ -1117,9 +1117,9 @@ impl Tray {
             }
             MENU_UPDATE => {
                 if update_status.phase == crate::update::UpdatePhase::Unsupported {
-                    // Older Windows builds cannot defer an AppInstaller URI. This
-                    // fallback opens HTTPS only after the explicit menu action.
-                    let url = HSTRING::from(crate::update::APPINSTALLER_URL);
+                    // Unsupported Windows builds open the release instructions.
+                    // This happens only after the explicit menu action.
+                    let url = HSTRING::from(crate::update::RELEASES_URL);
                     let result = unsafe {
                         ShellExecuteW(Some(self.owner.0), w!("open"), &url, None, None, SW_SHOW)
                     };

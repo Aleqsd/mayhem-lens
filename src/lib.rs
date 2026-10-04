@@ -9,3 +9,4 @@ pub mod model;
 pub mod native;
 #[cfg(windows)]
 pub mod update;
+pub(crate) mod update_package;
