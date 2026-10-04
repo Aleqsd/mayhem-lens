@@ -2,7 +2,7 @@
 
 ## État du prototype 1.2.1
 
-La capture du code courant utilise DXGI Desktop Duplication en remplacement de WGC. Le correctif n'a pas encore été installé ou lancé pendant la partie de l'utilisateur ; il ne constitue pas une validation en jeu. Consigner les résultats de formatage, compilation, Clippy et tests de la 1.2.1 après le pipeline complet. Les décomptes ci-dessous décrivent leurs versions respectives.
+La capture du code courant utilise DXGI Desktop Duplication en remplacement de WGC. Le correctif n'a pas encore été installé ou lancé pendant la partie de l'utilisateur ; il ne constitue pas une validation en jeu. Les décomptes ci-dessous décrivent leurs versions respectives.
 
 Le code complet doit passer formatage, compilation, Clippy et tests sans lancer une fenêtre. Les tests métier utilisent des fixtures synthétiques. La validation locale du 4 octobre a également téléchargé les données Mayhem réelles de Jinx, Brand et Tahm Kench, vérifié la réutilisation du cache et lu les recommandations FR/EN avec un proxy HTTP invalide : la lecture depuis le cache ne dépend pas du fournisseur. Les 446 noms du catalogue FR/EN et leurs 446 variantes avec retour à la ligne sont associés au bon ID dans un test local sans capture.
 
@@ -70,7 +70,9 @@ La 1.2.0 démarrait et fermait WGC à chaque poll. Le cadre associé à cette AP
 
 ## Capture 1.2.1 : vérifications sans partie
 
-La validation locale passe le formatage, la compilation sur toutes les cibles, Clippy avec avertissements bloquants et **103 tests** (aucun échec, une fixture MSIX historique ignorée). Les nouveaux cas couvrent notamment le recadrage d'un choix statique lors des transitions de ROI, la séparation GPU/CPU, les coordonnées d'écrans et les contextes d'erreur. Aucun de ces contrôles n'initialise la capture GPU, ne lance l'overlay ni n'installe un package.
+Le pipeline local final passe `cargo fmt --check`, la compilation et Clippy sur toutes les cibles avec `--locked` et avertissements bloquants, puis **103 tests réussis**, aucun échec et une fixture MSIX historique ignorée. Ces contrôles n'initialisent pas de device GPU, ne capturent aucun écran et ne lancent ni interface ni installation. La CI et le packaging sont des contrôles séparés ; ces résultats locaux ne prouvent pas le comportement en jeu.
+
+Les nouveaux cas couvrent notamment le recadrage d'un choix statique lors des transitions de ROI, la séparation GPU/CPU, les coordonnées d'écrans et les contextes d'erreur.
 
 Contrôler les projections physiques de ROI avec origine de moniteur négative et sans seconde mise à l'échelle DPI ; rejeter régions hors fenêtre, fenêtre répartie sur plusieurs moniteurs, dimensions invalides et écrans pivotés. Vérifier que le device appartient à l'adaptateur de la sortie choisie, que la texture indépendante sur le GPU couvre uniquement la fenêtre LoL et que seule la ROI est copiée vers la mémoire CPU. Chaque acquisition réussie doit être libérée même en cas d'erreur de validation ou de readback ; un mapping réussi doit être démappé sur tous les retours.
 
