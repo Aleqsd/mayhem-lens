@@ -1,0 +1,13 @@
+[package]
+name = "mayhem-lens"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Overlay Windows de tiers d'augmentations ARAM Mayhem"
+
+[dependencies]
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"

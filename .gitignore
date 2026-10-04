@@ -1,0 +1,13 @@
+/target/
+/dist/
+/cache/
+/captures/
+/work/
+/.env
+/.env.*
+*.log
+*.pfx
+*.key
+*.pem
+*.dmp
+*.local.json
