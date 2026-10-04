@@ -71,6 +71,8 @@ struct ScanStatus {
     reading_quality: ReadingQuality,
     offer_stage: StageReading,
     calibration: Option<crate::calibration::CalibrationSnapshot>,
+    capture_work: Option<native::CaptureWork>,
+    scan_interval_ms: Option<u64>,
     error: Option<ScanError>,
 }
 
@@ -97,6 +99,8 @@ impl ScanStatus {
             reading_quality: ReadingQuality::Uncertain,
             offer_stage: StageReading::resolve(None, false, None),
             calibration: None,
+            capture_work: None,
+            scan_interval_ms: None,
             error: None,
         }
     }
@@ -117,6 +121,8 @@ impl ScanStatus {
         self.reading_quality = ReadingQuality::Uncertain;
         self.offer_stage = StageReading::resolve(None, false, None);
         self.calibration = None;
+        self.capture_work = None;
+        self.scan_interval_ms = None;
         self.error = None;
     }
 
@@ -502,6 +508,7 @@ fn scan_loop(
     let mut reading_gate = ReadingGate::default();
     let mut stage_tracker = StageTracker::default();
     let mut reading_bounds = None;
+    let mut scan_schedule = crate::scan_policy::ScanSchedule::new();
     let mut diagnostic_writer = ScanStatusWriter::new(app_directory().join("scan-status.json"));
     while !stop.load(Ordering::Relaxed) {
         if last_read.elapsed() >= Duration::from_secs(2) {
@@ -515,6 +522,8 @@ fn scan_loop(
                         reading_gate.reset();
                         stage_tracker.reset();
                         previous.clear();
+                        scan_schedule.reset();
+                        native::reset_calibration();
                         clear_badges(&sender);
                     }
                     config = settings;
@@ -608,6 +617,7 @@ fn scan_loop(
                 stage_tracker.reset();
                 native::reset_calibration();
                 reading_bounds = None;
+                scan_schedule.reset();
                 config = crate::config::modify(&config_path, |config| {
                     config.selected_augments.clear();
                     config.offer_stage = None;
@@ -617,13 +627,19 @@ fn scan_loop(
             let game_foreground = native::game_window_visible();
             diagnostic.game_foreground = game_foreground;
             if game_foreground
-                && (force || last_scan.elapsed() >= Duration::from_millis(config.scan_interval_ms))
+                && (force
+                    || last_scan.elapsed()
+                        >= Duration::from_millis(
+                            scan_schedule.interval_ms(config.scan_interval_ms),
+                        ))
             {
                 last_scan = Instant::now();
                 diagnostic.phase = "scanning";
+                diagnostic.scan_interval_ms =
+                    Some(scan_schedule.interval_ms(config.scan_interval_ms));
                 diagnostic_writer.publish_if_due(&diagnostic, Instant::now());
                 let scan_started = Instant::now();
-                match native::observe_game(&config.language) {
+                match native::observe_game(&config.language, force, scan_schedule.is_active()) {
                     Ok(reading) => {
                         if reading_bounds != Some(reading.game_bounds) {
                             reading_gate.reset();
@@ -662,6 +678,7 @@ fn scan_loop(
                         diagnostic.reading_quality = quality;
                         diagnostic.offer_stage = stage;
                         diagnostic.calibration = Some(reading.calibration);
+                        diagnostic.capture_work = Some(reading.work);
                         let association = association_started.elapsed();
                         diagnostic.last_scan_at_unix_ms = Some(unix_ms());
                         diagnostic.observation_count = observations.len();
@@ -679,6 +696,7 @@ fn scan_loop(
                                 < Duration::from_millis(
                                     config.scan_interval_ms.saturating_add(1500),
                                 );
+                        scan_schedule.observe(offers.len() == 3 && current);
                         if current && quality != ReadingQuality::Uncertain {
                             native::calibrate_offers(
                                 &offers.iter().map(|offer| offer.rect).collect::<Vec<_>>(),
@@ -711,6 +729,11 @@ fn scan_loop(
                             }
                             diagnostic.badges_requested_count = badges_requested_count;
                         } else {
+                            if !previous.is_empty() {
+                                // Losing a learned group after a reroll requests
+                                // one fresh broad OCR on the next scheduled poll.
+                                native::invalidate_observations();
+                            }
                             if current_generation != Some(active.generation) {
                                 diagnostic.phase = "sessionChanged";
                             } else if !current {
@@ -743,6 +766,7 @@ fn scan_loop(
                         diagnostic.total_scan_ms = diagnostic.capture_ocr_ms;
                         diagnostic.error = Some(safe_scan_error(&error));
                         previous.clear();
+                        scan_schedule.reset();
                         reading_gate.reset();
                         stage_tracker.reset();
                         native::calibrate_offers(&[]);
@@ -756,6 +780,9 @@ fn scan_loop(
                 previous.clear();
                 reading_gate.reset();
                 stage_tracker.reset();
+                scan_schedule.reset();
+                native::reset_calibration();
+                reading_bounds = None;
                 clear_badges(&sender);
             }
         } else {
@@ -766,6 +793,9 @@ fn scan_loop(
             previous.clear();
             reading_gate.reset();
             stage_tracker.reset();
+            scan_schedule.reset();
+            native::reset_calibration();
+            reading_bounds = None;
             clear_badges(&sender);
         }
         diagnostic_writer.publish_if_due(&diagnostic, Instant::now());

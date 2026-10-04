@@ -1,6 +1,6 @@
 # Plan de validation
 
-## État du prototype 1.1.1
+## État du prototype 1.2.0
 
 Le code complet doit passer formatage, compilation, Clippy et tests sans lancer une fenêtre. Les tests métier utilisent des fixtures synthétiques. La validation locale du 4 octobre a également téléchargé les données Mayhem réelles de Jinx, Brand et Tahm Kench, vérifié la réutilisation du cache et lu les recommandations FR/EN avec un proxy HTTP invalide : la lecture depuis le cache ne dépend pas du fournisseur. Les 446 noms du catalogue FR/EN et leurs 446 variantes avec retour à la ligne sont associés au bon ID dans un test local sans capture.
 
@@ -38,6 +38,26 @@ Sur une installation réelle, avec l'utilisateur disponible, vérifier l'interfa
 
 Les contrôles de packaging et la signature des fichiers ne prouvent pas que Windows acceptera le certificat ni que l'interface, l'installation et le lancement fonctionnent sur un autre PC. Ces validations restent en attente.
 
+## Reconnaissance adaptative : validation du code courant
+
+Les nouveaux contrôles doivent couvrir le préfiltre, la cadence et les caches sans fenêtre ni capture personnelle. Les décomptes des versions précédentes ci-dessus restent historiques ; consigner le résultat final après le pipeline complet du changement.
+
+Le préfiltre `Candidate`/`Uncertain`/`Absent` n'est jamais une preuve de présence, d'absence ou d'identité des offres. Les fixtures synthétiques vérifient des titres dans trois colonnes à différentes tailles et hauteurs, les lignes décalées et titres sur plusieurs lignes, une région uniforme sombre ou claire, un seul texte, des rectangles, un contraste faible, des titres colorés et des buffers invalides. Un faux candidat ne doit pas produire de tier sans les validations OCR et catalogue habituelles. Un faux négatif doit garder la sonde OCR complète de secours, y compris avec `Absent`.
+
+Vérifier que trois offres reconnues activent l'intervalle configuré, **900 ms par défaut**, borné de 400 à 5000 ms ; une lecture manquée ramène la surveillance à un minimum de **1500 ms** sans accélérer un réglage utilisateur plus lent. La sonde OCR complète devient due après **3 secondes** sans région apprise, ou **5 secondes** avec apprentissage. Ces conditions sont évaluées lors des polls ; tester également les configurations lentes sans annoncer un timer exact ni une latence garantie de 3 ou 5 secondes.
+
+Le cache sépare l'en-tête et trois cellules larges couvrant les remplacements longs ou sur plusieurs lignes après reroll. Vérifier qu'une signature de pixels ou une géométrie modifiée invalide la lecture de cette région avant OCR, que les autres régions peuvent être réutilisées et qu'un en-tête changé ne conserve pas un ancien stade. Tester la purge sur nouvelle session, langue, fenêtre, changement de résolution/position, perte de premier plan et lecture manquée. La sonde complète périodique doit contourner les caches ; **Ctrl+Shift+M**, ou le raccourci configuré, doit aussi contourner la cadence et le préfiltre pour relire la zone large.
+
+L'essai réel doit vérifier la première offre, les rerolls d'une carte, les titres FR/EN longs ou sur plusieurs lignes, les cartes sombres/colorées, les animations et une interface sans bouton de reroll disponible. Aucun bouton ni position exacte de titre n'est une condition de la détection. Mesurer séparément le coût de capture, préfiltre, OCR complet, lectures de régions et réutilisations ; aucune économie de CPU, de GPU ou de latence n'est déduite de la compilation ou des fixtures.
+
+## Reconnaissance 1.2.0 : contrôles sans capture
+
+La validation locale passe le formatage, la compilation sur toutes les cibles, Clippy avec avertissements bloquants et **94 tests** (aucun échec, une fixture MSIX historique ignorée). Les vingt nouveaux tests utilisent uniquement des pixels, observations et géométries synthétiques ; ils ne démarrent ni WGC, ni OCR Windows, ni fenêtre.
+
+Ils couvrent les indices visuels faibles ou absents, les échéances de secours, la relecture forcée, les transitions de cadence, l'invalidation indépendante des cartes et de l'en-tête, les changements de géométrie et les titres longs sur deux lignes. Les cellules couvrent aussi un remplacement central de 40 % de largeur, admis par l'association des offres. Un fragment voisin ou un titre décentré ne peut pas devenir une offre régionale : une nouvelle recherche globale doit rétablir la géométrie. Après une vraie lecture globale, les quatre caches repartent des observations globales courantes.
+
+Ces contrôles ne prouvent pas la précision OCR, la latence ni le coût CPU/GPU en partie. Le prochain test doit comparer les compteurs `ocrRegions`/`cachedRegions`, le temps de reconnaissance et les cartes réellement proposées, puis vérifier un reroll, la disparition du choix et Alt-Tab. Aucun logiciel n'a été installé, aucune confiance ajoutée et aucun contrôle d'écran effectué pour cette évolution.
+
 ## Mises à jour
 
 ### Contrôles sans installation
@@ -74,6 +94,8 @@ Avec l'utilisateur disponible, lancer le package installé puis lui demander de 
 Le snapshot de scan distingue les observations OCR, les titres associés au catalogue et le groupe de trois offres accepté. Il contient les IDs, noms FR/EN, scores de similarité, tiers du fournisseur, champion et patch, ainsi que `badgesRequestedCount`. Les noms ne sont pas le texte OCR brut et la similarité n'est pas une probabilité calibrée. Les listes de titres sont bornées à 16 entrées, avec un indicateur de troncature ; le nombre total reste disponible.
 
 `captureOcrMs` mesure l'appel de capture/OCR natif, qui peut réutiliser une reconnaissance en mémoire si le contenu n'a pas changé. `associationMs` mesure l'association et le regroupement spatial ; `totalScanMs` inclut aussi la préparation et l'envoi des badges. Ces valeurs concernent la dernière lecture terminée, datée par `lastScanAtUnixMs`. Une phase `scanning` et un horodatage qui cesse de progresser aident à repérer une opération bloquée ; ces durées ne mesurent pas les pixels effectivement affichés.
+
+`captureWork.visualGate` expose `candidate`, `uncertain` ou `absent`, sans fournir une probabilité OCR. `captureWork.mode` distingue `visualOnly`, `full`, `fullCache` et `regions` ; `captureWork.ocrRegions` compte les régions reconnues par OCR pendant cette capture, et `captureWork.cachedRegions` les lectures réutilisées. En mode `regions`, leur somme décrit l'en-tête et les trois cellules ; en mode `full`, une seule région large est relue. `scanIntervalMs` est l'intervalle appliqué avant la capture terminée et peut changer au scan suivant selon les offres reconnues. Interpréter ces compteurs avec le mode et la fraîcheur du snapshot, jamais comme une preuve de précision ou de rendu.
 
 Le snapshot de rendu est séparé : `visibleWindowCount`, les positions, `displayReason`, la géométrie du jeu et l'âge des derniers badges indiquent ce que les fenêtres Win32 déclarent. Comparer les badges demandés à ces fenêtres sans confondre visibilité native et rendu visible à l'écran, qui doit être confirmé par l'utilisateur.
 

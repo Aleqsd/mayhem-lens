@@ -1,10 +1,10 @@
 # Installation Windows
 
-La version 1.1.1 est expérimentale. Le parcours recommandé utilise `MayhemLens-Setup-1.1.1.exe`, un installateur natif avec une interface sombre qui contient le MSIX et son certificat public. L'installation manuelle du MSIX reste disponible. Les scripts de packaging ne lancent aucun installateur, n'approuvent aucun certificat et ne démarrent pas l'overlay ; la signature de développement est une étape séparée.
+La version 1.2.0 est expérimentale. Le parcours recommandé utilise `MayhemLens-Setup-1.2.0.exe`, un installateur natif avec une interface sombre qui contient le MSIX et son certificat public. L'installation manuelle du MSIX reste disponible. Les scripts de packaging ne lancent aucun installateur, n'approuvent aucun certificat et ne démarrent pas l'overlay ; la signature de développement est une étape séparée.
 
 ## Installer avec le Setup
 
-1. Depuis la [dernière release GitHub](https://github.com/Aleqsd/mayhem-lens/releases/latest), télécharger `MayhemLens-Setup-1.1.1.exe`, puis l'ouvrir avec le compte Windows qui utilisera Mayhem Lens.
+1. Depuis la [dernière release GitHub](https://github.com/Aleqsd/mayhem-lens/releases/latest), télécharger `MayhemLens-Setup-1.2.0.exe`, puis l'ouvrir avec le compte Windows qui utilisera Mayhem Lens.
 2. Lire l'identité du certificat et accepter explicitement sa confiance pour cette installation. Si le certificat de développement n'est pas encore approuvé, seul le helper chargé de l'ajouter dans `LocalMachine\TrustedPeople` demande une élévation UAC. Le MSIX est installé pour l'utilisateur courant.
 3. L'installateur indique le résultat de l'installation et les éventuelles langues OCR manquantes. Il n'installe pas silencieusement de fonctionnalités Windows ; choisir une langue OCR déjà installée ou ajouter la fonctionnalité souhaitée dans Windows.
 4. Après réussite, cliquer sur **Lancer Mayhem Lens** pour ouvrir l'application, ou la retrouver ensuite dans le menu Démarrer. L'installation ne lance pas automatiquement l'overlay.
@@ -30,14 +30,14 @@ Un MSIX doit être signé par un certificat dont le sujet correspond exactement 
 `scripts/sign-development.ps1` peut préparer cette signature sans installer l'application ni modifier les magasins de certificats. Il crée une clé de développement sauvegardée chiffrée par DPAPI pour l'utilisateur Windows courant, signe le package et exporte uniquement le certificat public à partager. Le PFX temporaire est supprimé. Une signature ne vaut pas approbation du certificat sur la machine destinataire.
 
 ```powershell
-./scripts/sign-development.ps1 -PackagePath 'dist\MayhemLens_1.1.1.0_x64.msix' `
+./scripts/sign-development.ps1 -PackagePath 'dist\MayhemLens_1.2.0.0_x64.msix' `
   -SigningDirectory 'dist\private-signing' -PublicCertificatePath 'dist\MayhemLens-Development.cer'
 ```
 
 Le Windows SDK contient `SignTool.exe`. Exemple avec un certificat déjà présent et utilisable dans le magasin de l'utilisateur :
 
 ```powershell
-& '<Windows SDK>\x64\signtool.exe' sign /fd SHA256 /sha1 '<empreinte du certificat>' 'dist\MayhemLens_1.1.1.0_x64.msix'
+& '<Windows SDK>\x64\signtool.exe' sign /fd SHA256 /sha1 '<empreinte du certificat>' 'dist\MayhemLens_1.2.0.0_x64.msix'
 ```
 
 Ne pas committer ou partager la clé privée/PFX. Le fichier `.cer` distribué contient uniquement la clé publique. Un certificat de développement doit être approuvé dans le magasin de l'ordinateur `Trusted People` sur chaque PC de test ; cette étape demande les droits administrateur. [Documentation Microsoft sur les certificats de test](https://learn.microsoft.com/en-us/windows/uwp/packaging/create-certificate-package-signing).
@@ -48,7 +48,7 @@ Après création puis signature du MSIX, intégrer ce package et le certificat p
 
 ```powershell
 ./scripts/package-setup.ps1 -PublicCertificatePath 'dist\MayhemLens-Development.cer'
-./scripts/sign-development.ps1 -PackagePath 'dist\MayhemLens-Setup-1.1.1.exe' `
+./scripts/sign-development.ps1 -PackagePath 'dist\MayhemLens-Setup-1.2.0.exe' `
   -SigningDirectory 'dist\private-signing' -PublicCertificatePath 'dist\MayhemLens-Development.cer'
 ```
 
@@ -58,7 +58,7 @@ Pour une release publique, signer le MSIX **avant** de l'intégrer, puis signer 
 
 ## Installation manuelle du MSIX
 
-1. Ouvrir la [dernière release GitHub](https://github.com/Aleqsd/mayhem-lens/releases/latest) et télécharger `MayhemLens-Development.cer` ainsi que `MayhemLens_1.1.1.0_x64.msix` pour la version 1.1.1.
+1. Ouvrir la [dernière release GitHub](https://github.com/Aleqsd/mayhem-lens/releases/latest) et télécharger `MayhemLens-Development.cer` ainsi que `MayhemLens_1.2.0.0_x64.msix` pour la version 1.2.0.
 2. Approuver le certificat public dans le magasin de l'ordinateur **Trusted People** (`LocalMachine\TrustedPeople`). Cette étape demande les droits administrateur. Depuis PowerShell ouvert en administrateur, dans le dossier du certificat :
 
    ```powershell
@@ -70,7 +70,7 @@ Pour une release publique, signer le MSIX **avant** de l'intégrer, puis signer 
 
 À partir de la version 1.0.1, le MSIX direct est le parcours prévu ; aucune association à un fichier `.appinstaller` n'est requise. La [signature MSIX et sa confiance sur le PC](https://learn.microsoft.com/en-us/windows/msix/package/signing-package-overview) restent vérifiées par Windows.
 
-Si la version 1.0.0 est déjà installée, utiliser le Setup ou ouvrir manuellement le MSIX 1.1.1 pour adopter le mécanisme de mises à jour corrigé. Les versions 1.0.1 ou ultérieures disposent déjà du téléchargement natif ; le certificat reste identique et n'a pas à être approuvé à nouveau s'il est déjà installé.
+Si la version 1.0.0 est déjà installée, utiliser le Setup ou ouvrir manuellement le MSIX 1.2.0 pour adopter le mécanisme de mises à jour corrigé. Les versions 1.0.1 ou ultérieures disposent déjà du téléchargement natif ; le certificat reste identique et n'a pas à être approuvé à nouveau s'il est déjà installé.
 
 Le code et les fichiers de release sont publics. Les clés privées, configurations personnelles, caches, captures et datasets tiers restent hors du dépôt et du package.
 

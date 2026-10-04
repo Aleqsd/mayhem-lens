@@ -1,4 +1,8 @@
-use super::{Badge, CaptureReading, Observation, Rect, UserAction};
+use super::{Badge, CaptureReading, CaptureWork, Observation, Rect, UserAction};
+use crate::{
+    ocr_cache::{RegionOcrCache, RegionOcrKey},
+    visual_gate::{self, VisualGate},
+};
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 use std::{
@@ -312,7 +316,7 @@ fn window_bounds(hwnd: HWND) -> Result<Rect> {
 pub fn invalidate_observations() {
     CAPTURE_WORKER.with(|cell| {
         if let Some(worker) = cell.borrow_mut().as_mut() {
-            worker.last_signature = None;
+            worker.invalidate();
         }
     });
 }
@@ -321,6 +325,11 @@ pub fn calibrate_offers(rects: &[Rect]) {
     CAPTURE_WORKER.with(|cell| {
         if let Some(worker) = cell.borrow_mut().as_mut() {
             worker.calibration.feedback(rects);
+            if rects.is_empty() {
+                worker.last_signature = None;
+                worker.last_observations.clear();
+                worker.regions.reset();
+            }
         }
     });
 }
@@ -329,13 +338,12 @@ pub fn reset_calibration() {
     CAPTURE_WORKER.with(|cell| {
         if let Some(worker) = cell.borrow_mut().as_mut() {
             worker.calibration.reset();
-            worker.last_signature = None;
-            worker.last_observations.clear();
+            worker.invalidate();
         }
     });
 }
 
-pub fn observe_game(language: &str) -> Result<CaptureReading> {
+pub fn observe_game(language: &str, force: bool, has_offers: bool) -> Result<CaptureReading> {
     let hwnd = game_window().context("Fenêtre LoL visible introuvable")?;
     ensure!(
         unsafe { GetForegroundWindow() == hwnd },
@@ -351,7 +359,10 @@ pub fn observe_game(language: &str) -> Result<CaptureReading> {
             *state = Some(CaptureWorker::new(language)?);
         }
         let worker = state.as_mut().context("Worker capture indisponible")?;
-        match worker.observe(hwnd, bounds) {
+        if force {
+            worker.invalidate();
+        }
+        match worker.observe(hwnd, bounds, has_offers) {
             Ok(reading) => Ok(reading),
             Err(error) => {
                 // Discard potentially lost GPU resources; the next call recreates them.
@@ -385,6 +396,10 @@ struct CaptureWorker {
     staging_size: (u32, u32),
     last_signature: Option<(u64, Rect, Rect, usize, usize)>,
     last_observations: Vec<Observation>,
+    regions: RegionOcrCache,
+    last_full_ocr: Option<Instant>,
+    force_next: bool,
+    last_bounds: Option<Rect>,
     calibration: crate::calibration::Calibration,
     // Must drop last, after the WinRT/COM fields declared above.
     _apartment: Apartment,
@@ -445,13 +460,30 @@ impl CaptureWorker {
             staging_size: (0, 0),
             last_signature: None,
             last_observations: Vec::new(),
+            regions: RegionOcrCache::new(),
+            last_full_ocr: None,
+            force_next: false,
+            last_bounds: None,
             calibration: crate::calibration::Calibration::default(),
             _apartment: apartment,
         })
     }
 
-    fn observe(&mut self, hwnd: HWND, bounds: Rect) -> Result<CaptureReading> {
-        let calibration = self.calibration.next(bounds);
+    fn invalidate(&mut self) {
+        self.last_signature = None;
+        self.last_observations.clear();
+        self.regions.reset();
+        self.last_full_ocr = None;
+        self.force_next = true;
+    }
+
+    fn observe(&mut self, hwnd: HWND, bounds: Rect, has_offers: bool) -> Result<CaptureReading> {
+        if self.last_bounds != Some(bounds) {
+            self.invalidate();
+            self.calibration.reset();
+            self.last_bounds = Some(bounds);
+        }
+        let mut calibration = self.calibration.next(bounds);
         let interop: IGraphicsCaptureItemInterop =
             factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()?;
         // SAFETY: this targets only the visible game HWND identified above, never memory.
@@ -474,7 +506,19 @@ impl CaptureWorker {
                 item,
                 pool,
             });
-            self.last_signature = None;
+            self.invalidate();
+            self.calibration.reset();
+            calibration = self.calibration.next(bounds);
+        }
+        let regions = self.calibration.regions();
+        let probe_due = full_probe_due(self.last_full_ocr, Instant::now(), regions.is_some());
+        let full = self.force_next
+            || probe_due
+            || calibration.mode != crate::calibration::CalibrationMode::Learned
+            || regions.is_none();
+        if full && regions.is_some() {
+            calibration.roi = crate::calibration::discovery(bounds);
+            calibration.mode = crate::calibration::CalibrationMode::PeriodicDiscovery;
         }
         let source = self.source.as_ref().context("Source WGC absente")?;
         // Drain leftovers before starting a fresh, short-lived session. No capture
@@ -497,35 +541,133 @@ impl CaptureWorker {
         let frame = frame?;
         let image_result = self.copy_title_band(&frame, bounds, calibration.roi);
         let _ = frame.Close();
-        let mut image = image_result?;
+        let image = image_result?;
         // Foreground and geometry are rechecked after capture to reject stale work.
         ensure!(
             unsafe { GetForegroundWindow() == hwnd } && window_bounds(hwnd)? == bounds,
             "Le jeu a changé de fenêtre ou de position pendant la capture"
         );
-        let signature = (
-            fingerprint(&image.pixels),
-            bounds,
-            Rect {
-                x: image.left as i32,
-                y: image.top as i32,
-                width: image.source_width as i32,
-                height: image.source_height as i32,
-            },
-            image.frame_width,
-            image.frame_height,
-        );
-        if self.last_signature == Some(signature) {
+        let gate = visual_gate::inspect(&image.pixels, image.width, image.height);
+        let mut work = CaptureWork {
+            visual_gate: gate,
+            mode: "full",
+            ocr_regions: 0,
+            cached_regions: 0,
+        };
+        if !should_recognize(
+            gate,
+            regions.is_some() || has_offers,
+            self.force_next,
+            probe_due,
+        ) {
+            self.last_signature = None;
+            self.last_observations.clear();
+            self.regions.reset();
+            work.mode = "visualOnly";
+            return Ok(CaptureReading {
+                observations: Vec::new(),
+                game_bounds: bounds,
+                calibration,
+                work,
+            });
+        }
+        let signature = full.then(|| {
+            (
+                fingerprint(&image.pixels),
+                bounds,
+                Rect {
+                    x: image.left as i32,
+                    y: image.top as i32,
+                    width: image.source_width as i32,
+                    height: image.source_height as i32,
+                },
+                image.frame_width,
+                image.frame_height,
+            )
+        });
+        if full && !self.force_next && !probe_due && self.last_signature == signature {
             ensure!(
                 unsafe { GetForegroundWindow() == hwnd } && window_bounds(hwnd)? == bounds,
                 "Le jeu a changé pendant la reconnaissance en cache"
             );
+            work.mode = "fullCache";
+            work.cached_regions = 1;
             return Ok(CaptureReading {
                 observations: self.last_observations.clone(),
                 game_bounds: bounds,
                 calibration,
+                work,
             });
         }
+        let observations = if full {
+            let mut keys = Vec::new();
+            if let Some(regions) = regions {
+                for (index, region) in regions.into_iter().enumerate() {
+                    keys.push((index, image.crop(bounds, region)?.cache_key(region)));
+                }
+            }
+            let result = self.recognize(image, bounds)?;
+            // A broad probe can segment text better than a regional OCR. Replace
+            // all old regional results with this current, complete-frame reading.
+            self.regions.reset();
+            for (index, key) in keys {
+                let reading = result
+                    .iter()
+                    .filter(|o| self.calibration.owns_observation(index, o.rect))
+                    .cloned()
+                    .collect();
+                self.regions.put(index, key, reading);
+            }
+            self.last_signature = signature;
+            self.last_observations = result.clone();
+            self.last_full_ocr = Some(Instant::now());
+            self.force_next = false;
+            work.ocr_regions = 1;
+            result
+        } else {
+            work.mode = "regions";
+            let mut combined = Vec::new();
+            for (index, region) in regions
+                .context("Régions OCR absentes")?
+                .into_iter()
+                .enumerate()
+            {
+                let cropped = image.crop(bounds, region)?;
+                let key = cropped.cache_key(region);
+                let read = if let Some(cached) = self.regions.get(index, key) {
+                    work.cached_regions += 1;
+                    cached.to_vec()
+                } else {
+                    let mut read = self.recognize(cropped, bounds)?;
+                    read.retain(|o| self.calibration.owns_observation(index, o.rect));
+                    work.ocr_regions += 1;
+                    self.regions.put(index, key, read.clone());
+                    read
+                };
+                for observation in read {
+                    if !combined.contains(&observation) {
+                        combined.push(observation);
+                    }
+                }
+            }
+            // Do not let an old whole-band signature bypass newer slot reads.
+            self.last_signature = None;
+            self.last_observations.clear();
+            combined
+        };
+        ensure!(
+            unsafe { GetForegroundWindow() == hwnd } && window_bounds(hwnd)? == bounds,
+            "Le jeu a changé pendant la reconnaissance"
+        );
+        Ok(CaptureReading {
+            observations,
+            game_bounds: bounds,
+            calibration,
+            work,
+        })
+    }
+
+    fn recognize(&self, mut image: CapturedBand, bounds: Rect) -> Result<Vec<Observation>> {
         // Windows OCR has a finite bitmap size. Reduce only this ROI, retaining
         // its native dimensions for projection back to the game's physical pixels.
         image.fit_ocr(OcrEngine::MaxImageDimension()? as usize)?;
@@ -591,17 +733,7 @@ impl CaptureWorker {
         }
         add_wrapped_titles(&mut observations);
         let _ = bitmap.Close();
-        ensure!(
-            unsafe { GetForegroundWindow() == hwnd } && window_bounds(hwnd)? == bounds,
-            "Le jeu a changé pendant la reconnaissance"
-        );
-        self.last_signature = Some(signature);
-        self.last_observations = observations.clone();
-        Ok(CaptureReading {
-            observations,
-            game_bounds: bounds,
-            calibration,
-        })
+        Ok(observations)
     }
 
     fn copy_title_band(
@@ -787,6 +919,63 @@ struct CapturedBand {
 }
 
 impl CapturedBand {
+    fn cache_key(&self, region: Rect) -> RegionOcrKey {
+        RegionOcrKey {
+            region,
+            frame_bounds: Rect {
+                x: self.left as i32,
+                y: self.top as i32,
+                width: self.source_width as i32,
+                height: self.source_height as i32,
+            },
+            frame_width: self.frame_width,
+            frame_height: self.frame_height,
+            pixels_hash: fingerprint(&self.pixels),
+        }
+    }
+    fn crop(&self, bounds: Rect, region: Rect) -> Result<Self> {
+        ensure!(
+            self.width == self.source_width && self.height == self.source_height,
+            "Recadrage après réduction OCR interdit"
+        );
+        let frame_region = crate::calibration::frame_region(
+            bounds,
+            region,
+            self.frame_width.try_into()?,
+            self.frame_height.try_into()?,
+        )
+        .context("Région OCR invalide")?;
+        let left = frame_region.x as usize;
+        let top = frame_region.y as usize;
+        let width = frame_region.width as usize;
+        let height = frame_region.height as usize;
+        ensure!(
+            left >= self.left as usize
+                && top >= self.top as usize
+                && left + width <= self.left as usize + self.width
+                && top + height <= self.top as usize + self.height,
+            "Région OCR hors de la bande capturée"
+        );
+        let offset_x = left - self.left as usize;
+        let offset_y = top - self.top as usize;
+        let mut pixels = Vec::with_capacity(width * height * 4);
+        for row in offset_y..offset_y + height {
+            let start = (row * self.width + offset_x) * 4;
+            pixels.extend_from_slice(&self.pixels[start..start + width * 4]);
+        }
+        Ok(Self {
+            pixels,
+            left: left as u32,
+            top: top as u32,
+            width,
+            height,
+            source_width: width,
+            source_height: height,
+            frame_width: self.frame_width,
+            frame_height: self.frame_height,
+        })
+    }
+
     fn project(&self, rect: windows::Foundation::Rect, bounds: Rect) -> Rect {
         let scale_x = bounds.width as f32 / self.frame_width as f32;
         let scale_y = bounds.height as f32 / self.frame_height as f32;
@@ -845,6 +1034,18 @@ fn fingerprint(bytes: &[u8]) -> u64 {
     // cause extra OCR; it cannot conceal a changed title by a similarity threshold.
     bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
         (hash ^ u64::from(*byte)).wrapping_mul(0x100_0000_01b3)
+    })
+}
+
+fn should_recognize(gate: VisualGate, learned: bool, forced: bool, probe_due: bool) -> bool {
+    // Visual absence is only a hint: learned slots always compare fresh pixels,
+    // and the periodic full probe catches sampling, color and layout misses.
+    learned || forced || probe_due || gate == VisualGate::Candidate
+}
+
+fn full_probe_due(last: Option<Instant>, now: Instant, learned: bool) -> bool {
+    last.is_none_or(|last| {
+        now.saturating_duration_since(last) >= Duration::from_secs(if learned { 5 } else { 3 })
     })
 }
 
@@ -1883,6 +2084,113 @@ fn safe_badge_bounds(rect: Rect, game: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn visual_hints_cannot_block_forced_active_or_periodic_recognition() {
+        for gate in [VisualGate::Absent, VisualGate::Uncertain] {
+            assert!(!should_recognize(gate, false, false, false));
+            assert!(should_recognize(gate, true, false, false));
+            assert!(should_recognize(gate, false, true, false));
+            assert!(should_recognize(gate, false, false, true));
+        }
+        assert!(should_recognize(VisualGate::Candidate, false, false, false));
+    }
+
+    #[test]
+    fn full_probes_remain_due_after_idle_and_learned_deadlines() {
+        let now = Instant::now();
+        assert!(full_probe_due(None, now, false));
+        assert!(!full_probe_due(
+            Some(now),
+            now + Duration::from_millis(2999),
+            false
+        ));
+        assert!(full_probe_due(
+            Some(now),
+            now + Duration::from_secs(3),
+            false
+        ));
+        assert!(!full_probe_due(
+            Some(now),
+            now + Duration::from_millis(4999),
+            true
+        ));
+        assert!(full_probe_due(
+            Some(now),
+            now + Duration::from_secs(5),
+            true
+        ));
+        // A slower configured scan can arrive after the target deadline.
+        assert!(full_probe_due(
+            Some(now),
+            now + Duration::from_secs(8),
+            true
+        ));
+    }
+
+    #[test]
+    fn regional_crops_isolate_rerolls_and_preserve_frame_projection() {
+        let bounds = Rect {
+            x: -200,
+            y: -100,
+            width: 200,
+            height: 100,
+        };
+        let mut image = CapturedBand {
+            pixels: [20, 20, 20, 255].repeat(80 * 30),
+            left: 10,
+            top: 10,
+            width: 80,
+            height: 30,
+            source_width: 80,
+            source_height: 30,
+            frame_width: 100,
+            frame_height: 50,
+        };
+        let first = Rect {
+            x: -180,
+            y: -60,
+            width: 50,
+            height: 20,
+        };
+        let second = Rect { x: -130, ..first };
+        let before = image.crop(bounds, first).unwrap();
+        let unchanged = image.crop(bounds, second).unwrap();
+        // A changed glyph in the second line, beyond a previous short title.
+        let offset = ((28 - 10) * image.width + (32 - 10)) * 4;
+        image.pixels[offset] = 240;
+        let after = image.crop(bounds, first).unwrap();
+        assert_ne!(fingerprint(&before.pixels), fingerprint(&after.pixels));
+        assert_eq!(
+            fingerprint(&unchanged.pixels),
+            fingerprint(&image.crop(bounds, second).unwrap().pixels)
+        );
+        assert_eq!(
+            after.project(
+                windows::Foundation::Rect {
+                    X: 0.0,
+                    Y: 0.0,
+                    Width: 25.0,
+                    Height: 10.0
+                },
+                bounds
+            ),
+            first
+        );
+        assert!(
+            image
+                .crop(
+                    bounds,
+                    Rect {
+                        x: bounds.x,
+                        ..first
+                    }
+                )
+                .is_err()
+        );
+        image.fit_ocr(40).unwrap();
+        assert!(image.crop(bounds, first).is_err());
+    }
 
     #[test]
     fn hotkey_conflicts_preserve_other_bindings_and_safe_warning_codes() {

@@ -27,6 +27,16 @@ pub struct CaptureReading {
     pub observations: Vec<Observation>,
     pub game_bounds: Rect,
     pub calibration: crate::calibration::CalibrationSnapshot,
+    pub(crate) work: CaptureWork,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CaptureWork {
+    pub visual_gate: crate::visual_gate::VisualGate,
+    pub mode: &'static str,
+    pub ocr_regions: usize,
+    pub cached_regions: usize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -120,7 +130,7 @@ pub fn acquire_single_instance() -> anyhow::Result<InstanceGuard> {
 }
 
 #[cfg(not(windows))]
-pub fn observe_game(_: &str) -> anyhow::Result<CaptureReading> {
+pub fn observe_game(_: &str, _: bool, _: bool) -> anyhow::Result<CaptureReading> {
     anyhow::bail!("La capture native nécessite Windows.")
 }
 

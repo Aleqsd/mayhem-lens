@@ -66,6 +66,80 @@ impl Calibration {
         }
     }
 
+    /// Fixed card cells, rather than the previous title's narrow OCR box. The
+    /// envelope includes space for a longer, wrapped replacement after a reroll.
+    /// Index zero is the separate stage header; the other three are title cells.
+    pub(crate) fn regions(&self) -> Option<[Rect; 4]> {
+        let roi = self.learned?;
+        let bounds = self.bounds?;
+        let titles = self.pending_titles?;
+        let centers = titles.map(|r| i64::from(r.x) + i64::from(r.width) / 2);
+        let edges = [
+            i64::from(roi.x),
+            (centers[0] + centers[1]) / 2,
+            (centers[1] + centers[2]) / 2,
+            i64::from(roi.x) + i64::from(roi.width),
+        ];
+        let top = titles.iter().map(|r| r.y).min()?;
+        let title_top = (top - fraction(bounds.height, 2)).max(roi.y);
+        let bottom = roi.y + roi.height;
+        let header = Rect {
+            height: top - roi.y,
+            ..roi
+        };
+        if header.height <= 0 {
+            return None;
+        }
+        // Offer association accepts titles up to 40% of the window. Cover it
+        // plus the tolerated 1% center drift, even for formerly very short names.
+        let half_width = i64::from(fraction(bounds.width, 21));
+        let cells: [Rect; 3] = std::array::from_fn(|i| {
+            let left = edges[i].min(centers[i] - half_width).max(edges[0]);
+            let right = edges[i + 1].max(centers[i] + half_width).min(edges[3]);
+            Rect {
+                x: left as i32,
+                y: title_top,
+                width: (right - left) as i32,
+                height: bottom - title_top,
+            }
+        });
+        Some([header, cells[0], cells[1], cells[2]])
+    }
+
+    /// Broad OCR cells can overlap to preserve long words. Assign their text
+    /// back to its nearest learned card center instead of importing a neighbour.
+    pub(crate) fn owns_observation(&self, index: usize, rect: Rect) -> bool {
+        let Some(regions) = self.regions() else {
+            return false;
+        };
+        if index >= regions.len() || !inside(rect, regions[index]) {
+            return false;
+        }
+        if index == 0 {
+            return true;
+        }
+        let Some(titles) = self.pending_titles else {
+            return false;
+        };
+        let center = i64::from(rect.x) * 2 + i64::from(rect.width);
+        let centers = titles.map(|r| i64::from(r.x) * 2 + i64::from(r.width));
+        let Some(bounds) = self.bounds else {
+            return false;
+        };
+        // A fragment from the neighbouring, wider rerolled title can cross the
+        // midpoint and look closer to this card. Only a centered title remains
+        // eligible for regional reuse; moved layouts require broad discovery.
+        let tolerance = i64::from((bounds.width / 100).max(2)) * 2;
+        if (center - centers[index - 1]).abs() > tolerance {
+            return false;
+        }
+        centers
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, candidate)| (center - **candidate).abs())
+            .is_some_and(|(slot, _)| slot + 1 == index)
+    }
+
     /// Called only with the three accepted title bounds, or [] after a miss.
     pub(crate) fn feedback(&mut self, rects: &[Rect]) {
         let Some(bounds) = self.bounds else { return };
@@ -180,7 +254,8 @@ fn coherent_region(bounds: Rect, rects: &[Rect]) -> Option<(Rect, [Rect; 3])> {
         .iter()
         .map(|rect| i64::from(rect.y) + i64::from(rect.height))
         .max()?;
-    let padded_bottom = (bottom + i64::from(fraction(bounds.height, 4).max(2)))
+    let envelope_bottom = bottom.max(i64::from(max_top) + i64::from(fraction(bounds.height, 10)));
+    let padded_bottom = (envelope_bottom + i64::from(fraction(bounds.height, 4).max(2)))
         .min(i64::from(broad.y) + i64::from(broad.height));
     // Preserve broad horizontal bounds and its header area: long replacement
     // titles and the explicit choice header must remain visible after learning.
@@ -218,6 +293,97 @@ pub(crate) fn frame_region(bounds: Rect, roi: Rect, width: i32, height: i32) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fixed_cells_cover_long_wrapped_rerolls_and_keep_header_separate() {
+        for (width, height, x, y) in [
+            (1280, 720, 0, 0),
+            (2560, 1440, -2560, -1440),
+            (3840, 2160, 0, 0),
+        ] {
+            let game = Rect {
+                x,
+                y,
+                width,
+                height,
+            };
+            let mut calibration = Calibration::default();
+            calibration.next(game);
+            let short = titles(game);
+            assert!(calibration.regions().is_none());
+            calibration.feedback(&short);
+            calibration.feedback(&short);
+            let regions = calibration.regions().unwrap();
+            for (slot, before) in short.into_iter().enumerate() {
+                let long = Rect {
+                    x: before.x + before.width / 2 - fraction(width, 15),
+                    width: fraction(width, 30),
+                    height: fraction(height, 8),
+                    ..before
+                };
+                assert!(inside(long, regions[slot + 1]));
+                assert!(calibration.owns_observation(slot + 1, long));
+                assert!(!calibration.owns_observation((slot + 1) % 3 + 1, long));
+                assert!(inside(regions[slot + 1], calibration.learned.unwrap()));
+            }
+            assert_eq!(regions[0].y, discovery(game).y);
+            assert_eq!(regions[0].y + regions[0].height, short[0].y);
+            let central_wide = Rect {
+                x: short[1].x + short[1].width / 2 - fraction(width, 20),
+                width: fraction(width, 40),
+                height: fraction(height, 8),
+                ..short[1]
+            };
+            assert!(inside(central_wide, regions[2]));
+            assert!(calibration.owns_observation(2, central_wide));
+            calibration.feedback(&[]);
+            assert!(calibration.regions().is_none());
+        }
+    }
+
+    #[test]
+    fn clipped_neighbour_and_moved_title_cannot_become_a_regional_offer() {
+        let bounds = Rect {
+            x: 0,
+            y: 0,
+            width: 1000,
+            height: 700,
+        };
+        let titles = [240, 500, 760].map(|center| Rect {
+            x: center - 40,
+            y: 322,
+            width: 80,
+            height: 21,
+        });
+        let mut calibration = Calibration::default();
+        calibration.next(bounds);
+        calibration.feedback(&titles);
+        calibration.feedback(&titles);
+        let fragment = Rect {
+            x: 340,
+            y: 322,
+            width: 70,
+            height: 21,
+        };
+        assert!(inside(fragment, calibration.regions().unwrap()[2]));
+        assert!(!calibration.owns_observation(2, fragment));
+        assert!(!calibration.owns_observation(
+            1,
+            Rect {
+                x: 110,
+                width: 300,
+                ..titles[0]
+            }
+        ));
+        assert!(calibration.owns_observation(
+            1,
+            Rect {
+                x: 90,
+                width: 300,
+                ..titles[0]
+            }
+        ));
+    }
 
     fn titles(game: Rect) -> [Rect; 3] {
         [20, 46, 72].map(|percent| Rect {
