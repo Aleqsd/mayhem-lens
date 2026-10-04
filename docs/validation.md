@@ -10,7 +10,7 @@ La validation initiale de la version 0.1.0 comprend 30 tests couvrant notamment 
 
 Cette preuve n'inclut pas le rendu Windows, le passage des clics, le focus, la précision OCR ou les ressources consommées en partie. Ces validations attendent la disponibilité de l'utilisateur : aucun contrôle clavier/souris, lancement d'overlay ou installation pendant son jeu.
 
-La version 1.0.0 passe localement 38 tests, le formatage, la compilation et Clippy sur toutes les cibles avec avertissements bloquants. Elle ajoute la vérification de mises à jour au lancement et dans le menu, ainsi que les diagnostics de reconnaissance et d'affichage. L'installation par `.appinstaller`, la confiance du certificat sur un autre PC et la prise d'effet au lancement suivant ne sont pas validées par une compilation, des tests unitaires ou la création du MSIX. Aucune installation ni validation graphique n'a été effectuée pour cette fonctionnalité.
+La version 1.0.0 passe localement 42 tests, le formatage, la compilation et Clippy sur toutes les cibles avec avertissements bloquants. Elle ajoute la vérification de mises à jour au lancement et dans le menu, ainsi que les diagnostics de reconnaissance et d'affichage. Les tests couvrent aussi les conflits de raccourcis, la récupération d'un catalogue trop ancien et le rejet de données chargées pour une partie qui a changé. L'installation par `.appinstaller`, la confiance du certificat sur un autre PC et la prise d'effet au lancement suivant ne sont pas validées par une compilation, des tests unitaires ou la création du MSIX. Aucune installation ni validation graphique n'a été effectuée pour cette fonctionnalité.
 
 ## Mises à jour
 
@@ -48,6 +48,8 @@ Le snapshot de scan distingue les observations OCR, les titres associés au cata
 `captureOcrMs` mesure l'appel de capture/OCR natif, qui peut réutiliser une reconnaissance en mémoire si le contenu n'a pas changé. `associationMs` mesure l'association et le regroupement spatial ; `totalScanMs` inclut aussi la préparation et l'envoi des badges. Ces valeurs concernent la dernière lecture terminée, datée par `lastScanAtUnixMs`. Une phase `scanning` et un horodatage qui cesse de progresser aident à repérer une opération bloquée ; ces durées ne mesurent pas les pixels effectivement affichés.
 
 Le snapshot de rendu est séparé : `visibleWindowCount`, les positions, `displayReason`, la géométrie du jeu et l'âge des derniers badges indiquent ce que les fenêtres Win32 déclarent. Comparer les badges demandés à ces fenêtres sans confondre visibilité native et rendu visible à l'écran, qui doit être confirmé par l'utilisateur.
+
+`hotkeyWarnings` indique les raccourcis indisponibles avec leur code numérique. Un conflit doit laisser démarrer le tray et les badges ; vérifier la relecture et l'arrêt depuis le menu. La confirmation des choix reste dépendante des raccourcis 1/2/3, dont l'indisponibilité est signalée.
 
 Pendant un choix, vérifier l'identité du champion, le patch, trois offres distinctes et les tiers correspondants. Après un reroll ou Alt-Tab, vérifier le retrait des fenêtres. Lors d'une lecture manquée, `noOfferGroup` ou `captureOcrError` doit être distingué d'une demande de badges réussie. Les erreurs de scan conservent un contexte fixe et éventuellement un HRESULT, sans texte arbitraire provenant du jeu.
 

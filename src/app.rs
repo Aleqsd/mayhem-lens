@@ -328,7 +328,7 @@ fn data_loop(
     while !stop.load(Ordering::Relaxed) {
         match game::read_game() {
             Ok(Some(game)) => {
-                let changed = champion != game.champion_key || game.game_time + 10.0 < last_time;
+                let changed = game_context_changed(&champion, last_time, &game);
                 if changed {
                     generation += 1;
                     champion.clone_from(&game.champion_key);
@@ -352,16 +352,7 @@ fn data_loop(
                     );
                     let load = (|| -> Result<Session> {
                         let catalog = store.catalog()?;
-                        let id = catalog
-                            .champions
-                            .iter()
-                            .find(|c| {
-                                c.key.eq_ignore_ascii_case(&game.champion_key)
-                                    || c.name_en == game.champion_name
-                                    || c.name_fr == game.champion_name
-                            })
-                            .map(|c| c.id)
-                            .context("Identifiant du champion absent du catalogue")?;
+                        let id = resolve_champion_id(&game, &catalog, || store.refresh_catalog())?;
                         let (snapshot, offline) = match store.sync_champion(id) {
                             Ok(snapshot) => (snapshot, false),
                             Err(sync_error) => (
@@ -386,24 +377,41 @@ fn data_loop(
                     })();
                     match load {
                         Ok(loaded) => {
-                            write_status(
-                                status,
-                                if loaded.offline {
-                                    "ready-offline"
-                                } else {
-                                    "ready"
-                                },
-                                &format!(
-                                    "ARAMKit Mayhem / champion {} / patch {} / dataset {}",
-                                    loaded.snapshot.champion_id,
-                                    loaded.snapshot.patch,
-                                    loaded.snapshot.dataset_date
-                                ),
-                            );
-                            prepared = Some(Arc::new(loaded));
-                            *session
-                                .write()
-                                .map_err(|_| anyhow::anyhow!("Verrou session"))? = prepared.clone();
+                            // Loading can outlive the game context that requested it.
+                            // Errors/non-KIWI/absence are all insufficient to publish.
+                            let latest_game = game::read_game().ok().flatten();
+                            if prepared_session_is_current(&game, latest_game.as_ref()) {
+                                write_status(
+                                    status,
+                                    if loaded.offline {
+                                        "ready-offline"
+                                    } else {
+                                        "ready"
+                                    },
+                                    &format!(
+                                        "ARAMKit Mayhem / champion {} / patch {} / dataset {}",
+                                        loaded.snapshot.champion_id,
+                                        loaded.snapshot.patch,
+                                        loaded.snapshot.dataset_date
+                                    ),
+                                );
+                                prepared = Some(Arc::new(loaded));
+                                *session
+                                    .write()
+                                    .map_err(|_| anyhow::anyhow!("Verrou session"))? =
+                                    prepared.clone();
+                            } else {
+                                // Preserve champion/last_time: the next poll must
+                                // still notice the new context and advance generation.
+                                // If the API is flaky in the same game, do not start
+                                // provider requests every two seconds.
+                                retry_after = Instant::now() + Duration::from_secs(30);
+                                write_status(
+                                    status,
+                                    "session-changed",
+                                    "Chargement périmé : contexte de partie à confirmer",
+                                );
+                            }
                         }
                         Err(error) => {
                             write_status(status, "data-unavailable", &format!("{error:#}"));
@@ -424,6 +432,48 @@ fn data_loop(
         sleep_stoppable(stop, Duration::from_secs(2));
     }
     Ok(())
+}
+
+fn game_context_changed(
+    champion_key: &str,
+    previous_game_time: f64,
+    latest: &game::GameState,
+) -> bool {
+    champion_key != latest.champion_key || latest.game_time + 10.0 < previous_game_time
+}
+
+fn prepared_session_is_current(
+    before_load: &game::GameState,
+    after_load: Option<&game::GameState>,
+) -> bool {
+    after_load.is_some_and(|latest| {
+        !game_context_changed(&before_load.champion_key, before_load.game_time, latest)
+    })
+}
+
+fn resolve_champion_id(
+    game: &game::GameState,
+    cached_catalog: &Catalog,
+    refresh_catalog: impl FnOnce() -> Result<Catalog>,
+) -> Result<u32> {
+    let find = |catalog: &Catalog| {
+        catalog
+            .champions
+            .iter()
+            .find(|champion| {
+                champion.key.eq_ignore_ascii_case(&game.champion_key)
+                    || champion.name_en == game.champion_name
+                    || champion.name_fr == game.champion_name
+            })
+            .map(|champion| champion.id)
+    };
+    if let Some(id) = find(cached_catalog) {
+        return Ok(id);
+    }
+    // A valid cached manifest can predate the champion's release. Refresh once;
+    // failures return to data_loop's existing 30-second retry, never the OCR path.
+    let current_catalog = refresh_catalog().context("Rafraîchir le catalogue des champions")?;
+    find(&current_catalog).context("Identifiant du champion absent du catalogue courant")
 }
 
 fn scan_loop(
@@ -790,7 +840,112 @@ fn write_status(previous: &Mutex<String>, state: &str, detail: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::Augment;
+    use crate::model::{Augment, Champion};
+
+    #[test]
+    fn prepared_session_requires_the_same_game_after_loading() {
+        let before = game::GameState {
+            champion_key: "Example".into(),
+            champion_name: "Exemple".into(),
+            level: 5,
+            game_time: 100.0,
+        };
+        for (game_time, expected) in [
+            (150.0, true),
+            (100.0, true),
+            (90.0, true),
+            (89.0, false),
+            (1.0, false),
+        ] {
+            let after = game::GameState {
+                game_time,
+                ..before.clone()
+            };
+            assert_eq!(
+                prepared_session_is_current(&before, Some(&after)),
+                expected,
+                "game time {game_time}"
+            );
+        }
+        assert!(!prepared_session_is_current(&before, None));
+        let different_champion = game::GameState {
+            champion_key: "NextExample".into(),
+            champion_name: "Autre exemple".into(),
+            ..before.clone()
+        };
+        assert!(!prepared_session_is_current(
+            &before,
+            Some(&different_champion)
+        ));
+        // Rejecting the result doesn't consume the next poll's session change.
+        assert!(game_context_changed(
+            &before.champion_key,
+            before.game_time,
+            &different_champion
+        ));
+    }
+
+    #[test]
+    fn missing_champion_refreshes_an_older_catalog_once_without_network() {
+        let cached = Catalog {
+            champions: vec![Champion {
+                id: 123,
+                key: "OldExample".into(),
+                name_fr: "Ancien exemple".into(),
+                name_en: "Old example".into(),
+            }],
+            ..Catalog::default()
+        };
+        let current = Catalog {
+            champions: vec![Champion {
+                id: 321,
+                key: "NewExample".into(),
+                name_fr: "Nouvel exemple".into(),
+                name_en: "New example".into(),
+            }],
+            ..Catalog::default()
+        };
+        let game = game::GameState {
+            champion_key: "newexample".into(),
+            champion_name: "Nouvel exemple".into(),
+            level: 1,
+            game_time: 1.0,
+        };
+        let refresh_count = std::cell::Cell::new(0);
+        let id = resolve_champion_id(&game, &cached, || {
+            refresh_count.set(refresh_count.get() + 1);
+            Ok(current.clone())
+        })
+        .unwrap();
+        assert_eq!(id, 321);
+        assert_eq!(refresh_count.get(), 1);
+        assert_eq!(
+            resolve_champion_id(&game, &current, || panic!(
+                "cached champion needs no refresh"
+            ))
+            .unwrap(),
+            321
+        );
+    }
+
+    #[test]
+    fn champion_still_missing_after_refresh_returns_to_the_bounded_retry() {
+        let game = game::GameState {
+            champion_key: "UnknownExample".into(),
+            champion_name: "Unknown example".into(),
+            level: 1,
+            game_time: 1.0,
+        };
+        let refresh_count = std::cell::Cell::new(0);
+        let missing = Catalog::default();
+        let result = resolve_champion_id(&game, &missing, || {
+            refresh_count.set(refresh_count.get() + 1);
+            Ok(Catalog::default())
+        });
+        assert!(result.is_err());
+        assert_eq!(refresh_count.get(), 1);
+    }
+
     fn catalog() -> Catalog {
         Catalog {
             augments: ["Spark", "River", "Cloud"]

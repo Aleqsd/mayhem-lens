@@ -787,44 +787,61 @@ fn fingerprint(bytes: &[u8]) -> u64 {
     })
 }
 
-struct Hotkeys {
-    registered: Vec<i32>,
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HotkeyWarning {
+    // Both fields are controlled locally, never formatted OS/source error text.
+    shortcut: &'static str,
+    error_code: String,
 }
-impl Hotkeys {
-    fn new() -> Result<Self> {
-        let mut keys = Self {
-            registered: Vec::new(),
-        };
-        for (id, key) in [
-            (HOTKEY_SCAN, b'M'),
-            (HOTKEY_QUIT, b'Q'),
-            (HOTKEY_SLOT_1, b'1'),
-            (HOTKEY_SLOT_2, b'2'),
-            (HOTKEY_SLOT_3, b'3'),
-        ] {
-            // SAFETY: thread-owned hotkey registration, no keyboard input injection.
-            unsafe {
-                RegisterHotKey(
-                    None,
-                    id,
-                    MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT,
-                    u32::from(key),
-                )
-            }
-            .with_context(|| {
-                format!(
-                    "Raccourci Ctrl+Shift+{} déjà utilisé ou indisponible",
-                    char::from(key)
-                )
-            })?;
-            keys.registered.push(id);
+
+struct HotkeyRegistrations {
+    registered: Vec<i32>,
+    unavailable: Vec<HotkeyWarning>,
+}
+
+fn register_hotkeys_with(
+    mut register: impl FnMut(i32, u32) -> std::result::Result<(), i32>,
+) -> HotkeyRegistrations {
+    let mut registrations = HotkeyRegistrations {
+        registered: Vec::new(),
+        unavailable: Vec::new(),
+    };
+    for (id, key, shortcut) in [
+        (HOTKEY_SCAN, b'M', "Ctrl+Shift+M"),
+        (HOTKEY_QUIT, b'Q', "Ctrl+Shift+Q"),
+        (HOTKEY_SLOT_1, b'1', "Ctrl+Shift+1"),
+        (HOTKEY_SLOT_2, b'2', "Ctrl+Shift+2"),
+        (HOTKEY_SLOT_3, b'3', "Ctrl+Shift+3"),
+    ] {
+        match register(id, u32::from(key)) {
+            Ok(()) => registrations.registered.push(id),
+            Err(code) => registrations.unavailable.push(HotkeyWarning {
+                shortcut,
+                error_code: format!("0x{:08X}", code as u32),
+            }),
         }
-        Ok(keys)
+    }
+    registrations
+}
+
+struct Hotkeys(HotkeyRegistrations);
+impl Hotkeys {
+    fn new() -> Self {
+        Self(register_hotkeys_with(|id, key| {
+            // SAFETY: thread-owned hotkey registration, no keyboard input injection.
+            unsafe { RegisterHotKey(None, id, MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT, key) }
+                .map_err(|error| error.code().0)
+        }))
+    }
+
+    fn available(&self, id: i32) -> bool {
+        self.0.registered.contains(&id)
     }
 }
 impl Drop for Hotkeys {
     fn drop(&mut self) {
-        for id in &self.registered {
+        for id in &self.0.registered {
             let _ = unsafe { UnregisterHotKey(None, *id) };
         }
     }
@@ -938,6 +955,7 @@ impl Tray {
         stop: &AtomicBool,
         config_path: &std::path::Path,
         updates: &crate::update::UpdateController,
+        hotkeys: &Hotkeys,
     ) -> Result<()> {
         let menu = PopupMenu(unsafe { CreatePopupMenu() }?);
         let config = crate::config::Config::load(config_path)?;
@@ -947,16 +965,32 @@ impl Tray {
             update_status.phase,
             crate::update::UpdatePhase::ReadyOnRestart | crate::update::UpdatePhase::Registered
         );
-        let scan = HSTRING::from(if english {
-            "Scan when back in game  (Ctrl+Shift+M)"
+        let scan_label = if english {
+            "Scan when back in game"
         } else {
-            "Scanner au retour au jeu  (Ctrl+Shift+M)"
+            "Scanner au retour au jeu"
+        };
+        let scan = HSTRING::from(if hotkeys.available(HOTKEY_SCAN) {
+            format!("{scan_label}  (Ctrl+Shift+M)")
+        } else {
+            scan_label.into()
         });
         // A menu opens only after an explicit click on the tray icon. Passive
         // badge updates never call SetForegroundWindow or generate game input.
         unsafe {
             AppendMenuW(menu.0, MF_STRING, MENU_SCAN as usize, &scan)?;
             AppendMenuW(menu.0, MF_SEPARATOR, 0, None)?;
+        }
+        for warning in &hotkeys.0.unavailable {
+            let label = if english {
+                format!("Shortcut unavailable: {}", warning.shortcut)
+            } else {
+                format!("Raccourci indisponible : {}", warning.shortcut)
+            };
+            unsafe { AppendMenuW(menu.0, MF_STRING | MF_GRAYED, 0, &HSTRING::from(label)) }?;
+        }
+        if !hotkeys.0.unavailable.is_empty() {
+            unsafe { AppendMenuW(menu.0, MF_SEPARATOR, 0, None) }?;
         }
         let stage = config.offer_stage;
         let unknown_flags = if stage.is_none() {
@@ -1026,11 +1060,18 @@ impl Tray {
                 menu.0,
                 MF_STRING,
                 MENU_QUIT as usize,
-                &HSTRING::from(match (english, update_ready) {
-                    (true, true) => "Quit to apply update  (Ctrl+Shift+Q)",
-                    (false, true) => "Quitter pour appliquer la mise à jour  (Ctrl+Shift+Q)",
-                    (true, false) => "Quit  (Ctrl+Shift+Q)",
-                    (false, false) => "Quitter  (Ctrl+Shift+Q)",
+                &HSTRING::from({
+                    let label = match (english, update_ready) {
+                        (true, true) => "Quit to apply update",
+                        (false, true) => "Quitter pour appliquer la mise à jour",
+                        (true, false) => "Quit",
+                        (false, false) => "Quitter",
+                    };
+                    if hotkeys.available(HOTKEY_QUIT) {
+                        format!("{label}  (Ctrl+Shift+Q)")
+                    } else {
+                        label.into()
+                    }
                 }),
             )?;
         }
@@ -1396,6 +1437,7 @@ struct DisplayStatus {
     display_reason: DisplayReason,
     last_badges_age_ms: Option<u64>,
     freshness_ttl_ms: u64,
+    hotkey_warnings: Vec<HotkeyWarning>,
 }
 
 /// Observations concern our owned HWNDs, not players, captures or recognized text.
@@ -1465,6 +1507,7 @@ fn display_status(
     context: &DisplayContext,
     last_received: Option<Instant>,
     scan_interval_ms: u64,
+    hotkeys: &Hotkeys,
 ) -> DisplayStatus {
     // SAFETY: every queried HWND is owned by this display thread and remains
     // alive throughout the snapshot. This checks the native WS_VISIBLE state;
@@ -1495,6 +1538,7 @@ fn display_status(
         display_reason: context.reason(),
         last_badges_age_ms: last_received.map(|received| duration_ms(received.elapsed())),
         freshness_ttl_ms: scan_interval_ms.saturating_add(1_500),
+        hotkey_warnings: hotkeys.0.unavailable.clone(),
     }
 }
 
@@ -1509,7 +1553,8 @@ pub fn run_overlay(
     let mut settings_read = Instant::now();
     let _apartment = Apartment::new()?;
     let _dpi = DpiContext::new();
-    let _hotkeys = Hotkeys::new()?;
+    // Shortcut conflicts must not prevent tray controls and passive rendering.
+    let hotkeys = Hotkeys::new();
     let instance = HINSTANCE(unsafe { GetModuleHandleW(None)? }.0);
     let window_class = WNDCLASSW {
         lpfnWndProc: Some(badge_proc),
@@ -1554,7 +1599,8 @@ pub fn run_overlay(
                     let _ = unsafe { ShowWindow(window.0, SW_HIDE) };
                 }
                 showing = false;
-                if let Err(error) = tray.show_menu(&actions, &stop, config_path, &updates) {
+                if let Err(error) = tray.show_menu(&actions, &stop, config_path, &updates, &hotkeys)
+                {
                     eprintln!("Menu Mayhem Lens : {error:#}");
                 }
             } else if message.message == WM_HOTKEY {
@@ -1664,6 +1710,7 @@ pub fn run_overlay(
                 &context,
                 last_received,
                 scan_interval_ms,
+                &hotkeys,
             ));
         }
         thread::sleep(Duration::from_millis(25));
@@ -1693,6 +1740,50 @@ fn safe_badge_bounds(rect: Rect, game: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hotkey_conflicts_preserve_other_bindings_and_safe_warning_codes() {
+        let conflict = 0x8007_0581_u32 as i32;
+        let mut attempted = Vec::new();
+        let registrations = register_hotkeys_with(|id, key| {
+            attempted.push((id, key));
+            if matches!(id, HOTKEY_SCAN | HOTKEY_SLOT_2) {
+                Err(conflict)
+            } else {
+                Ok(())
+            }
+        });
+        // A conflict does not short-circuit later bindings, and only successes
+        // enter the list that the real owning thread will unregister on Drop.
+        assert_eq!(attempted.len(), 5);
+        assert_eq!(
+            registrations.registered,
+            [HOTKEY_QUIT, HOTKEY_SLOT_1, HOTKEY_SLOT_3]
+        );
+        assert_eq!(
+            registrations.unavailable,
+            [
+                HotkeyWarning {
+                    shortcut: "Ctrl+Shift+M",
+                    error_code: "0x80070581".into(),
+                },
+                HotkeyWarning {
+                    shortcut: "Ctrl+Shift+2",
+                    error_code: "0x80070581".into(),
+                },
+            ]
+        );
+        let warnings = serde_json::to_value(&registrations.unavailable).unwrap();
+        assert_eq!(warnings[0]["shortcut"], "Ctrl+Shift+M");
+        assert_eq!(warnings[0]["errorCode"], "0x80070581");
+        assert_eq!(warnings[0].as_object().unwrap().len(), 2);
+
+        // Even with no global bindings available, registration returns a usable
+        // runtime state. No Windows hotkey API is invoked by either fake backend.
+        let unavailable = register_hotkeys_with(|_, _| Err(conflict));
+        assert!(unavailable.registered.is_empty());
+        assert_eq!(unavailable.unavailable.len(), 5);
+    }
 
     #[test]
     fn display_visibility_rejects_stale_background_and_moved_game_geometry() {

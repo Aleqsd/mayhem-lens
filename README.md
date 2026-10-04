@@ -61,12 +61,14 @@ Installer depuis le fichier `.appinstaller` de la [dernière version](https://gi
 
 La confirmation enregistre une augmentation pour les conseils de l'application : elle n'agit pas dans LoL. Un seul choix est enregistré par offre reconnue. Dans le package MSIX, les réglages et le cache sont dans `%LOCALAPPDATA%\Packages\<famille du package>\LocalState\MayhemLens`, un emplacement stable entre versions. L'exécutable seul utilise `%LOCALAPPDATA%\MayhemLens`. Un nouveau contexte de partie remet les choix et le stade à zéro.
 
+Si un autre logiciel réserve un raccourci, l'application continue à fonctionner et indique la combinaison indisponible dans son menu. Relecture et arrêt restent accessibles dans ce menu ; la confirmation d'un choix dépend du raccourci correspondant.
+
 ## Observer le prochain test en partie
 
 Après lancement, des snapshots locaux remplacés au maximum une fois par seconde permettent un suivi en lecture seule dans le même dossier de données : `%LOCALAPPDATA%\Packages\<famille du package>\LocalState\MayhemLens` pour le MSIX, `%LOCALAPPDATA%\MayhemLens` pour l'exécutable seul. La famille installée commence par `Aleqsd.MayhemLens_`.
 
 - `scan-status.json` : champion/patch, premier plan du jeu, nombres de lignes OCR et de titres/offres reconnus, noms du catalogue, IDs, similarité et tiers, durées, erreurs et nombre de badges demandés.
-- `display-status.json` : fenêtres natives demandées/visibles, positions, expiration et motif d'affichage ou de masquage. La visibilité Win32 n'est pas une preuve des pixels vus par le joueur.
+- `display-status.json` : fenêtres natives demandées/visibles, positions, expiration, motif d'affichage ou de masquage et raccourcis indisponibles. La visibilité Win32 n'est pas une preuve des pixels vus par le joueur.
 
 Vérifier l'âge du snapshot et son `processId` : un fichier ancien peut rester après la fermeture. Les noms proviennent du catalogue, pas du texte OCR brut ; aucune capture ni identité de joueur n'est conservée. Ce dispositif prépare le prochain test ARAM Mayhem ; il n'est pas une preuve que le rendu ou les performances en partie ont déjà été validés. Voir [le protocole de suivi](docs/validation.md#suivi-local-du-prochain-test-aram-mayhem).
 

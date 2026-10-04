@@ -47,7 +47,10 @@ impl DataStore {
     pub fn new(cache: PathBuf) -> Result<Self> {
         fs::create_dir_all(&cache).context("Créer le cache de données")?;
         let client = Client::builder()
-            .user_agent("MayhemLens/0.1 (private desktop companion)")
+            .user_agent(format!(
+                "MayhemLens/{} (Windows desktop companion)",
+                env!("CARGO_PKG_VERSION")
+            ))
             .timeout(Duration::from_secs(15))
             .connect_timeout(Duration::from_secs(5))
             .redirect(reqwest::redirect::Policy::none())
@@ -64,6 +67,13 @@ impl DataStore {
             }
             Err(_) => self.refresh_release()?,
         };
+        self.prepare_catalog(&release.patch)
+    }
+
+    /// Refreshes the manifest and its catalog when a cached list cannot identify
+    /// the current champion. Only call this from the data loading worker.
+    pub fn refresh_catalog(&self) -> Result<Catalog> {
+        let release = self.refresh_release()?;
         self.prepare_catalog(&release.patch)
     }
 
