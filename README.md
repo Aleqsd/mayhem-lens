@@ -6,7 +6,9 @@ Overlay Windows léger pour afficher les tiers des augmentations de **League of 
 
 ## Objectif
 
-Identifier le champion, reconnaître les trois augmentations proposées, puis afficher un badge discret près de chaque carte. Les données sont récupérées avant le choix et consultées localement pour garder le réseau hors du chemin critique.
+Identifier le champion, reconnaître automatiquement les trois augmentations proposées, puis afficher une lettre et une courte explication près de chaque carte. Ajouter des règles de synergie avec les choix précédents et des conseils d'objets/builds Mayhem. Les données du champion sont récupérées au début de la partie et consultées localement pour garder le réseau hors du chemin critique.
+
+Public initial : utilisateur et quelques amis. Langues : français et anglais. Cible initiale : Windows 11, jeu sans bordure sur l'écran principal en 1440p ; autres résolutions et mises à l'échelle à supporter. Installation classique, MSIX accepté.
 
 La source doit mesurer **Mayhem**. Les statistiques ARAM classiques et les classements Arena ne remplacent pas les données Mayhem.
 

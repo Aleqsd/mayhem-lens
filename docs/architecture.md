@@ -17,10 +17,12 @@ Un seul processus coordonnerait une boucle de messages Windows et des tâches de
 | Capture | Cibler la fenêtre du jeu, suivre taille/DPI, extraire uniquement les zones utiles à la reconnaissance. |
 | Reconnaissance | Identifier les noms dans un catalogue fermé, produire une confiance et gérer les ambiguïtés. |
 | Classement | Associer champion, augmentation et éventuellement stade au tier du snapshot. |
+| Synergies | Appliquer des règles identifiables aux augmentations précédentes et garder le résultat séparé du tier fournisseur. |
+| Builds | Présenter les routes et objets Mayhem disponibles pour le champion, avec leurs options et associations objet × augmentation. |
 | Overlay | Positionner les badges, laisser passer les clics, préserver le focus et ne redessiner qu'à la demande. |
 | Application | Barre système, réglages, raccourci, diagnostics et cycle de vie. |
 
-Ces responsabilités ne prescrivent pas sept crates. Garder une organisation proportionnée à un petit produit.
+Ces responsabilités ne prescrivent pas autant de crates. Garder une organisation proportionnée à un petit produit.
 
 ## Affichage Windows
 
@@ -42,6 +44,10 @@ Windows OCR et un moteur embarqué seront comparés sur les mêmes captures. [Wi
 
 Clé de données minimale : source, patch, champion, augmentation ; stade optionnel. Inclure la date du dataset, la date d'import et la population annoncée.
 
-Le réseau reste hors du parcours de choix. En cas d'échec, utiliser un cache compatible selon la politique retenue, ou indiquer l'indisponibilité. Un résultat absent ou incertain n'est jamais converti arbitrairement en mauvais tier.
+Les données du champion sont téléchargées au début de la partie, puis conservées en cache. Le réseau reste hors du parcours de choix. En cas d'échec, utiliser un cache compatible selon la politique retenue, ou indiquer l'indisponibilité. Un résultat absent ou incertain n'est jamais converti arbitrairement en mauvais tier.
 
-Les captures sont traitées localement. Aucune télémétrie, collecte de parties ou conservation de screenshots n'est décidée à ce stade.
+Les captures sont traitées localement. Télémétrie, collecte de parties et conservation de screenshots ne font pas partie du périmètre demandé.
+
+## Configuration retenue pour le prototype
+
+Windows 11, jeu sans bordure sur l'écran principal, trois écrans, 2560 × 1440 pour la première preuve. La position des éléments dépend de la fenêtre du jeu et de son DPI, avec détection des changements. Le français et l'anglais sont pris en charge. MSIX étant accepté, Windows OCR reste une option à comparer avant le choix définitif.

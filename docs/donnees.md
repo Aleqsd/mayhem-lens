@@ -26,6 +26,16 @@ Ces trois champions ne constituent pas une validation exhaustive du dataset. La 
 
 Les [conditions ARAMKit](https://aramkit.com/en-US/terms) n'établissent pas une licence de redistribution des données et encadrent l'automatisation. Un accès JSON public ne suffit pas à autoriser un import massif, un miroir ou un bundle redistribué.
 
+## Objets et builds Mayhem vérifiés
+
+Les trois JSON ARAMKit inspectés contiennent `items.{filtered,unfiltered}.all`, des classements par emplacement dans `slots`, puis des archétypes, profils et routes dans `builds`. Les routes comprennent un `purchaseOrder`, les objets de départ, bottes et options suivantes. Les [pages champion](https://aramkit.com/en-US/champions/jinx) présentent ces données comme des builds Mayhem.
+
+Des champs `augmentSpecific` apportent des associations objet × augmentation, avec effectif et `synergyDelta` dans certains objets. Ils ne prouvent pas un combo optimal de plusieurs augmentations ni un bénéfice causal.
+
+Une route observée de trois objets et des recommandations conditionnelles de fin de build ne sont pas un unique build de six objets dont le résultat aurait été mesuré. Les taux de sélection des archétypes, profils et routes ont des dénominateurs différents. L'option `filtered` retire les éléments liés aux augmentations de la présentation ; elle ne prouve pas une nouvelle population statistique de parties filtrées.
+
+Le cache par champion peut donc fournir les tiers d'augmentations et les conseils de builds sans importer les builds ARAM classiques. Les droits de partage restent à clarifier pour une distribution à des amis.
+
 ## API ARAMGG
 
 La documentation inspectée indique une clé gratuite avec 200 crédits par jour et 60 requêtes par minute. Le config public annonçait `16.19.3`, généré le 2 octobre 2026. L'accès à une route de données sans clé a retourné 401 ; aucune clé n'a été créée dans cette recherche.

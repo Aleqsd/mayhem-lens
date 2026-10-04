@@ -8,6 +8,8 @@ Le squelette Rust doit passer formatage, compilation et Clippy. Cela prouve uniq
 
 Sur la configuration de l'utilisateur, afficher des badges factices au-dessus du jeu sans bordure. Vérifier clics, focus, Alt-Tab, déplacement de fenêtre, DPI et disparition des badges lorsque le jeu quitte le premier plan. Mesurer les ressources consommées pendant cet affichage statique.
 
+Première cible : Windows 11 Professionnel, RTX 5080, trois écrans, jeu sur l'écran principal en 2560 × 1440. Ajouter des cas 1080p et 4K et plusieurs mises à l'échelle à la matrice, sans déduire leur compatibilité d'un succès en 1440p.
+
 ## Reconnaissance
 
 Comparer les moteurs OCR sur les mêmes captures de titres, avec les langues, résolutions et mises à l'échelle retenues. Mesurer erreurs, lectures ambiguës et latence. Inclure cartes animées, rerolls, titres longs et changements rapides. Les captures de test doivent être explicitement conservables ; les screenshots personnels restent hors du dépôt.
@@ -15,6 +17,8 @@ Comparer les moteurs OCR sur les mêmes captures de titres, avec les langues, r�
 ## Données
 
 Tester avec de petites fixtures synthétiques : séparation tier global/tier champion, stade inconnu, nouveau patch, `null`, augmentation absente et cache ancien. Un test ne doit pas simplement reproduire le parseur ; il doit vérifier un cas pouvant conduire à un mauvais badge.
+
+Vérifier également la séparation tier fournisseur/règle de synergie, les conflits entre règles, les choix précédents inconnus, ainsi que la présentation des routes de builds et options de fin de build sans fabriquer une statistique de build complet.
 
 ## Mesures en partie
 
