@@ -63,6 +63,8 @@ fn execute(mut args: Vec<String>) -> Result<()> {
                 config reset                      Effacer choix et stade\n\
                 status                            Lire l'état du worker\n\
                 diagnose                          Capacités Windows et API locale en lecture\n\
+                update check                      Vérifier une mise à jour sans l'installer\n\
+                update                            Préparer la mise à jour pour le prochain lancement\n\
                 --cache <dossier>                  Choisir un cache séparé\n\
                 --config <fichier>                 Choisir des réglages séparés\n\
                 Ctrl+Shift+M : relire les cartes ; Ctrl+Shift+1/2/3 : confirmer un choix ;\n\
@@ -166,6 +168,22 @@ fn execute(mut args: Vec<String>) -> Result<()> {
             }
         }
         "config" => configure(&args[1..], &config_path)?,
+        "update" => {
+            if args.len() > 2 || (args.len() == 2 && args[1] != "check") {
+                bail!("Usage : update [check]");
+            }
+            #[cfg(windows)]
+            {
+                let status = if args.len() == 2 {
+                    mayhem_lens::update::check()?
+                } else {
+                    mayhem_lens::update::check_and_stage()?
+                };
+                println!("{}", serde_json::to_string_pretty(&status)?);
+            }
+            #[cfg(not(windows))]
+            bail!("Les mises à jour natives nécessitent Windows.");
+        }
         "status" => {
             let path = app_directory().join("runtime-status.json");
             if path.exists() {

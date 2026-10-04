@@ -7,6 +7,7 @@
 /.env.*
 *.log
 *.pfx
+*.dpapi
 *.key
 *.pem
 *.dmp

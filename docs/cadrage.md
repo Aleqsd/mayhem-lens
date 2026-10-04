@@ -4,7 +4,7 @@ Date de référence : 4 octobre 2026. Les dix réponses sont consignées dans `q
 
 ## Décisions utilisateur reçues
 
-- Public : l'utilisateur et quelques amis ; le dépôt reste privé au démarrage.
+- Public cible : l'utilisateur et quelques amis. Le code et l'installateur sont publics, décision confirmée le 4 octobre.
 - V1 : tiers d'augmentations et conseils d'objets/builds.
 - Affichage pendant le choix : une lettre et une courte explication.
 - Déclenchement automatique avec raccourci de secours.
@@ -14,6 +14,7 @@ Date de référence : 4 octobre 2026. Les dix réponses sont consignées dans `q
 - LoL sans bordure, sur l'écran principal d'une installation à trois écrans ; 1440p pour la première validation, autres résolutions à supporter, DPI détecté automatiquement.
 - Installation Windows classique ; MSIX accepté.
 - Données du champion téléchargées au début de la partie, puis consultées depuis le cache.
+- Vérification des mises à jour au lancement et accès manuel simple depuis le menu système. Préparation native MSIX en arrière-plan, application après fermeture ; Windows 11 22H2 ou plus récent.
 
 ## Besoin exprimé
 
@@ -40,7 +41,7 @@ Détection du champion, cache par patch et source, reconnaissance locale automat
 
 La présentation des conseils d'objets/builds reste à préciser lors de la conception. Séparer le tier fournisseur de l'indication de synergie ; les règles ne recalculent pas silencieusement une prétendue statistique. L'identification des augmentations précédentes et du stade doit rester traçable, avec possibilité de correction via les réglages si la reconnaissance n'est pas fiable.
 
-La collecte de parties et la télémétrie ne font pas partie du périmètre demandé. La publication publique n'est pas décidée.
+La collecte de parties et la télémétrie ne font pas partie du périmètre demandé. L'utilisateur a choisi un dépôt public et des installateurs publics ; les données tierces restent téléchargées séparément.
 
 Une explication doit reposer sur des faits ou une règle identifiable ; la formule d'un tier fournisseur ne permet pas d'inventer une justification causale.
 

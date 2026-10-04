@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AppInstaller xmlns="http://schemas.microsoft.com/appx/appinstaller/2018"
+              Version="1.0.0.0"
+              Uri="https://github.com/Aleqsd/mayhem-lens/releases/latest/download/MayhemLens.appinstaller">
+  <MainPackage Name="Aleqsd.MayhemLens" Publisher="CN=Alexandre DO-O ALMEIDA"
+               Version="1.0.0.0" ProcessorArchitecture="x64"
+               Uri="https://github.com/Aleqsd/mayhem-lens/releases/download/v1.0.0/MayhemLens_1.0.0.0_x64.msix" />
+  <UpdateSettings>
+    <OnLaunch HoursBetweenUpdateChecks="0" ShowPrompt="false" UpdateBlocksActivation="false" />
+    <ForceUpdateFromAnyVersion>false</ForceUpdateFromAnyVersion>
+  </UpdateSettings>
+</AppInstaller>

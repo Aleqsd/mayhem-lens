@@ -7,3 +7,5 @@ pub mod game;
 pub mod model;
 #[cfg(windows)]
 pub mod native;
+#[cfg(windows)]
+pub mod update;

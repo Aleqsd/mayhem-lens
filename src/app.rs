@@ -3,10 +3,11 @@ use crate::{
     config::{Config, app_directory},
     data::DataStore,
     domain, game,
-    model::{Catalog, Snapshot},
+    model::{Catalog, Snapshot, Tier},
     native::{self, Badge, Observation, Rect, UserAction},
 };
 use anyhow::{Context, Result};
+use serde::Serialize;
 use std::{
     path::PathBuf,
     sync::{
@@ -15,7 +16,7 @@ use std::{
         mpsc,
     },
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 struct Session {
@@ -33,13 +34,228 @@ struct Offer {
     confidence: f32,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RecognizedTitle {
+    id: u32,
+    // Catalog names only: never retain the OCR input or a player's identity.
+    name_fr: String,
+    name_en: String,
+    confidence: f32,
+    tier: Tier,
+    stage_specific: bool,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ScanError {
+    stage: &'static str,
+    message: &'static str,
+    windows_error_code: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ScanStatus {
+    timestamp_unix_ms: u64,
+    process_id: u32,
+    phase: &'static str,
+    champion_id: Option<u32>,
+    patch: Option<String>,
+    game_foreground: bool,
+    last_scan_at_unix_ms: Option<u64>,
+    observation_count: usize,
+    recognized_title_count: usize,
+    offer_count: usize,
+    badges_requested_count: usize,
+    recognized_titles: Vec<RecognizedTitle>,
+    recognized_titles_truncated: bool,
+    offers: Vec<RecognizedTitle>,
+    capture_ocr_ms: Option<f64>,
+    association_ms: Option<f64>,
+    total_scan_ms: Option<f64>,
+    error: Option<ScanError>,
+}
+
+impl ScanStatus {
+    fn new() -> Self {
+        Self {
+            timestamp_unix_ms: unix_ms(),
+            process_id: std::process::id(),
+            phase: "waitingForSession",
+            champion_id: None,
+            patch: None,
+            game_foreground: false,
+            last_scan_at_unix_ms: None,
+            observation_count: 0,
+            recognized_title_count: 0,
+            offer_count: 0,
+            badges_requested_count: 0,
+            recognized_titles: Vec::new(),
+            recognized_titles_truncated: false,
+            offers: Vec::new(),
+            capture_ocr_ms: None,
+            association_ms: None,
+            total_scan_ms: None,
+            error: None,
+        }
+    }
+
+    fn clear_reading(&mut self, phase: &'static str) {
+        self.phase = phase;
+        self.last_scan_at_unix_ms = None;
+        self.observation_count = 0;
+        self.recognized_title_count = 0;
+        self.offer_count = 0;
+        self.badges_requested_count = 0;
+        self.recognized_titles.clear();
+        self.recognized_titles_truncated = false;
+        self.offers.clear();
+        self.capture_ocr_ms = None;
+        self.association_ms = None;
+        self.total_scan_ms = None;
+        self.error = None;
+    }
+
+    fn record_titles(
+        &mut self,
+        active: &Session,
+        config: &Config,
+        titles: &[Offer],
+        offers: &[Offer],
+    ) {
+        self.recognized_title_count = titles.len();
+        // Keep the snapshot small even if an OCR engine returns many title aliases.
+        self.recognized_titles_truncated = titles.len() > 16;
+        self.recognized_titles = diagnostic_titles(active, config, &titles[..titles.len().min(16)]);
+        self.offer_count = offers.len();
+        self.offers = diagnostic_titles(active, config, offers);
+        self.phase = if offers.len() == 3 {
+            "threeOffers"
+        } else {
+            "noOfferGroup"
+        };
+        self.error = None;
+    }
+}
+
+/// One overwritten local snapshot, with serialization/disk I/O off the OCR worker.
+/// A failed or busy diagnostic writer never changes runtime decisions.
+struct ScanStatusWriter {
+    sender: Option<mpsc::SyncSender<ScanStatus>>,
+    last_attempt: Option<Instant>,
+}
+
+impl ScanStatusWriter {
+    fn new(path: PathBuf) -> Self {
+        let (sender, snapshots) = mpsc::sync_channel::<ScanStatus>(1);
+        let worker = thread::Builder::new()
+            .name("mayhem-scan-status".into())
+            .spawn(move || {
+                let mut last_write: Option<Instant> = None;
+                while let Ok(mut snapshot) = snapshots.recv() {
+                    if let Some(previous) = last_write {
+                        thread::sleep(Duration::from_secs(1).saturating_sub(previous.elapsed()));
+                    }
+                    while let Ok(newer) = snapshots.try_recv() {
+                        snapshot = newer;
+                    }
+                    let _ = write_scan_snapshot(&path, &snapshot);
+                    last_write = Some(Instant::now());
+                }
+            });
+        Self {
+            sender: worker.ok().map(|_| sender),
+            last_attempt: None,
+        }
+    }
+
+    fn publish_if_due(&mut self, status: &ScanStatus, now: Instant) {
+        if self
+            .last_attempt
+            .is_some_and(|previous| now.duration_since(previous) < Duration::from_secs(1))
+        {
+            return;
+        }
+        self.last_attempt = Some(now);
+        if let Some(sender) = &self.sender {
+            let mut snapshot = status.clone();
+            snapshot.timestamp_unix_ms = unix_ms();
+            let _ = sender.try_send(snapshot);
+        }
+    }
+}
+
+fn write_scan_snapshot(path: &std::path::Path, status: &ScanStatus) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let temporary = path.with_extension("json.tmp");
+    std::fs::write(&temporary, serde_json::to_vec(status)?)?;
+    std::fs::rename(temporary, path)?;
+    Ok(())
+}
+
+fn unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u64::MAX as u128) as u64
+}
+
+fn diagnostic_titles(active: &Session, config: &Config, offers: &[Offer]) -> Vec<RecognizedTitle> {
+    let ids: Vec<_> = offers.iter().map(|offer| offer.id).collect();
+    let grades = domain::recommend(
+        &active.snapshot,
+        &active.catalog,
+        &ids,
+        &config.selected_augments,
+        config.offer_stage,
+    );
+    offers
+        .iter()
+        .zip(grades)
+        .filter_map(|(offer, grade)| {
+            let augment = active
+                .catalog
+                .augments
+                .iter()
+                .find(|augment| augment.id == offer.id)?;
+            Some(RecognizedTitle {
+                id: offer.id,
+                name_fr: augment.name_fr.clone(),
+                name_en: augment.name_en.clone(),
+                confidence: offer.confidence,
+                tier: grade.tier,
+                stage_specific: grade.stage_specific,
+            })
+        })
+        .collect()
+}
+
+fn safe_scan_error(error: &anyhow::Error) -> ScanError {
+    // Persist only fixed context and a numeric HRESULT, never arbitrary error
+    // strings that might contain paths, captured text or source response data.
+    ScanError {
+        stage: "captureOcr",
+        message: "Capture ou OCR indisponible",
+        windows_error_code: error.chain().find_map(|cause| {
+            cause
+                .downcast_ref::<windows::core::Error>()
+                .map(|value| format!("{:08X}", value.code().0 as u32))
+        }),
+    }
+}
+
 pub fn run(cache: PathBuf, config_path: PathBuf) -> Result<()> {
-    // Fail before starting workers if package identity/OCR support is unavailable.
+    // Require package/OCR support before starting the game workers.
     if !config_path.exists() {
         Config::default().save(&config_path)?;
     }
-    native::ensure_ready(&Config::load(&config_path)?.language)?;
     let _instance = native::acquire_single_instance()?;
+    let updates = crate::update::UpdateController::start()?;
+    native::ensure_ready(&Config::load(&config_path)?.language)?;
     let stop = Arc::new(AtomicBool::new(false));
     let session: Arc<RwLock<Option<Arc<Session>>>> = Arc::new(RwLock::new(None));
     let status = Arc::new(Mutex::new(String::new()));
@@ -73,7 +289,13 @@ pub fn run(cache: PathBuf, config_path: PathBuf) -> Result<()> {
                 scan_stop.store(true, Ordering::Relaxed);
             }
         })?;
-    let result = native::run_overlay(badges_rx, actions_tx, Arc::clone(&stop), &config_path);
+    let result = native::run_overlay(
+        badges_rx,
+        actions_tx,
+        Arc::clone(&stop),
+        &config_path,
+        updates,
+    );
     stop.store(true, Ordering::Relaxed);
     // A slow provider or OCR operation must not keep the application alive after
     // Quit. The executable exits after run returns; OS cleanup releases workers.
@@ -219,6 +441,8 @@ fn scan_loop(
     let mut last_read = Instant::now() - Duration::from_secs(10);
     let mut last_valid = Instant::now() - Duration::from_secs(10);
     let mut last_scan = Instant::now() - Duration::from_secs(10);
+    let mut diagnostic = ScanStatus::new();
+    let mut diagnostic_writer = ScanStatusWriter::new(app_directory().join("scan-status.json"));
     while !stop.load(Ordering::Relaxed) {
         if last_read.elapsed() >= Duration::from_secs(2) {
             match Config::load(&config_path) {
@@ -273,7 +497,12 @@ fn scan_loop(
             .map_err(|_| anyhow::anyhow!("Verrou session"))?
             .clone();
         if let Some(active) = active {
+            diagnostic.champion_id = Some(active.snapshot.champion_id);
+            if diagnostic.patch.as_deref() != Some(active.snapshot.patch.as_str()) {
+                diagnostic.patch = Some(active.snapshot.patch.clone());
+            }
             if generation != Some(active.generation) {
+                diagnostic.clear_reading("newSession");
                 generation = Some(active.generation);
                 previous.clear();
                 confirmed_cards = None;
@@ -281,13 +510,27 @@ fn scan_loop(
                 config.offer_stage = None;
                 config.save(&config_path)?;
             }
-            if native::game_window_visible()
+            let game_foreground = native::game_window_visible();
+            diagnostic.game_foreground = game_foreground;
+            if game_foreground
                 && (force || last_scan.elapsed() >= Duration::from_millis(config.scan_interval_ms))
             {
                 last_scan = Instant::now();
+                diagnostic.phase = "scanning";
+                diagnostic_writer.publish_if_due(&diagnostic, Instant::now());
+                let scan_started = Instant::now();
                 match native::observe_game(&config.language) {
                     Ok(observations) => {
-                        let offers = detect_offers(&observations, &active.matcher);
+                        let capture_ocr = scan_started.elapsed();
+                        let association_started = Instant::now();
+                        let (recognized, offers) = detect_offers(&observations, &active.matcher);
+                        let association = association_started.elapsed();
+                        diagnostic.last_scan_at_unix_ms = Some(unix_ms());
+                        diagnostic.observation_count = observations.len();
+                        diagnostic.capture_ocr_ms = Some(capture_ocr.as_secs_f64() * 1_000.0);
+                        diagnostic.association_ms = Some(association.as_secs_f64() * 1_000.0);
+                        diagnostic.record_titles(&active, &config, &recognized, &offers);
+                        diagnostic.badges_requested_count = 0;
                         let current_generation = session
                             .read()
                             .ok()
@@ -296,36 +539,64 @@ fn scan_loop(
                             last_valid = Instant::now();
                             previous = offers;
                             let badges = present(&active, &previous, &config);
+                            let badges_requested_count = badges.len();
                             if sender.send(badges).is_err() {
+                                diagnostic.phase = "displayChannelClosed";
+                                diagnostic_writer.publish_if_due(&diagnostic, Instant::now());
                                 break;
                             }
+                            diagnostic.badges_requested_count = badges_requested_count;
                         } else {
+                            if current_generation != Some(active.generation) {
+                                diagnostic.phase = "sessionChanged";
+                            }
                             previous.clear();
                             confirmed_cards = None;
                             let _ = sender.send(Vec::new());
                         }
+                        diagnostic.total_scan_ms =
+                            Some(scan_started.elapsed().as_secs_f64() * 1_000.0);
                     }
                     Err(error) => {
+                        diagnostic.clear_reading("captureOcrError");
+                        diagnostic.last_scan_at_unix_ms = Some(unix_ms());
+                        diagnostic.capture_ocr_ms =
+                            Some(scan_started.elapsed().as_secs_f64() * 1_000.0);
+                        diagnostic.total_scan_ms = diagnostic.capture_ocr_ms;
+                        diagnostic.error = Some(safe_scan_error(&error));
                         previous.clear();
                         let _ = sender.send(Vec::new());
                         write_status(status, "ocr-error", &format!("{error:#}"));
                     }
                 }
             } else if !native::game_window_visible() {
+                diagnostic.game_foreground = false;
+                diagnostic.clear_reading("pausedForeground");
                 previous.clear();
                 let _ = sender.send(Vec::new());
             }
         } else {
+            diagnostic.champion_id = None;
+            diagnostic.patch = None;
+            diagnostic.clear_reading("waitingForSession");
+            diagnostic.game_foreground = native::game_window_visible();
             previous.clear();
             let _ = sender.send(Vec::new());
         }
+        diagnostic_writer.publish_if_due(&diagnostic, Instant::now());
         sleep_stoppable(stop, Duration::from_millis(80));
     }
+    diagnostic.clear_reading("stopped");
+    diagnostic.game_foreground = false;
+    diagnostic_writer.publish_if_due(&diagnostic, Instant::now());
     let _ = sender.send(Vec::new());
     Ok(())
 }
 
-fn detect_offers(observations: &[Observation], matcher: &domain::AugmentMatcher) -> Vec<Offer> {
+fn detect_offers(
+    observations: &[Observation],
+    matcher: &domain::AugmentMatcher,
+) -> (Vec<Offer>, Vec<Offer>) {
     let mut candidates: Vec<_> = observations
         .iter()
         .filter_map(|o| {
@@ -361,10 +632,10 @@ fn detect_offers(observations: &[Observation], matcher: &domain::AugmentMatcher)
         let gap_b = centers[2] - centers[1];
         // Prevent a list of tooltips/body text from masquerading as three cards.
         if gap_a >= 100 && gap_b >= 100 && (gap_a - gap_b).abs() < gap_a.max(gap_b) / 2 {
-            return row;
+            return (candidates, row);
         }
     }
-    Vec::new()
+    (candidates, Vec::new())
 }
 
 fn present(session: &Session, offers: &[Offer], config: &Config) -> Vec<Badge> {
@@ -556,14 +827,14 @@ mod tests {
             observation("Cloud", 700, 500),
         ];
         let matcher = domain::AugmentMatcher::new(&catalog());
-        assert_eq!(detect_offers(&offers, &matcher).len(), 3);
-        assert!(detect_offers(&offers[..2], &matcher).is_empty());
+        assert_eq!(detect_offers(&offers, &matcher).1.len(), 3);
+        assert!(detect_offers(&offers[..2], &matcher).1.is_empty());
         let list = [
             observation("Spark", 100, 200),
             observation("River", 100, 400),
             observation("Cloud", 100, 600),
         ];
-        assert!(detect_offers(&list, &matcher).is_empty());
+        assert!(detect_offers(&list, &matcher).1.is_empty());
     }
     #[test]
     fn duplicate_or_uneven_layout_is_rejected() {
@@ -573,18 +844,122 @@ mod tests {
             observation("Cloud", 700, 500),
         ];
         let matcher = domain::AugmentMatcher::new(&catalog());
-        assert!(detect_offers(&offers, &matcher).is_empty());
+        assert!(detect_offers(&offers, &matcher).1.is_empty());
         let offers = [
             observation("Spark", 100, 500),
             observation("River", 400, 500),
             observation("Spark", 700, 500),
         ];
-        assert!(detect_offers(&offers, &matcher).is_empty());
+        assert!(detect_offers(&offers, &matcher).1.is_empty());
         let offers = [
             observation("Spark", 100, 500),
             observation("River", 220, 500),
             observation("Cloud", 1500, 500),
         ];
-        assert!(detect_offers(&offers, &matcher).is_empty());
+        assert!(detect_offers(&offers, &matcher).1.is_empty());
+    }
+
+    #[test]
+    fn diagnostics_record_catalog_grades_without_raw_ocr_or_render_claims() {
+        let catalog = catalog();
+        let active = Session {
+            matcher: domain::AugmentMatcher::new(&catalog),
+            catalog,
+            snapshot: Snapshot {
+                champion_id: 222,
+                patch: "26.19".into(),
+                source: "Synthetic test".into(),
+                dataset: "synthetic".into(),
+                dataset_date: String::new(),
+                fetched_at: String::new(),
+                augments: vec![crate::model::AugmentStat {
+                    id: 1,
+                    tier: Tier::S,
+                    rank: None,
+                    sample_count: None,
+                }],
+                stages: std::collections::BTreeMap::new(),
+                builds: Vec::new(),
+                item_synergies: Vec::new(),
+            },
+            generation: 1,
+            offline: false,
+        };
+        let observations = [
+            observation("Spark", 100, 500),
+            observation("River", 400, 500),
+            observation("Cloud", 700, 500),
+            observation("PrivatePlayer#1234", 900, 800),
+        ];
+        let (titles, offers) = detect_offers(&observations, &active.matcher);
+        let mut status = ScanStatus::new();
+        status.observation_count = observations.len();
+        status.record_titles(&active, &Config::default(), &titles, &offers);
+        status.badges_requested_count = 4; // Three letters plus a build panel request.
+        let value = serde_json::to_value(&status).unwrap();
+        assert_eq!(value["observationCount"], 4);
+        assert_eq!(value["recognizedTitleCount"], 3);
+        assert_eq!(value["offerCount"], 3);
+        assert_eq!(value["offers"][0]["tier"], "S");
+        assert_eq!(value["badgesRequestedCount"], 4);
+        assert!(!value.to_string().contains("PrivatePlayer"));
+        assert!(value.get("visibleWindowCount").is_none());
+        assert!(value.get("screenshots").is_none());
+        status.clear_reading("pausedForeground");
+        assert_eq!(status.offer_count, 0);
+        assert_eq!(status.badges_requested_count, 0);
+        assert!(status.offers.is_empty());
+        assert!(status.capture_ocr_ms.is_none());
+    }
+
+    #[test]
+    fn diagnostic_publication_is_throttled_without_blocking() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let mut writer = ScanStatusWriter {
+            sender: Some(sender),
+            last_attempt: None,
+        };
+        let mut status = ScanStatus::new();
+        let start = Instant::now();
+        writer.publish_if_due(&status, start);
+        assert_eq!(receiver.try_recv().unwrap().phase, "waitingForSession");
+        status.phase = "scanning";
+        writer.publish_if_due(&status, start + Duration::from_millis(999));
+        assert!(receiver.try_recv().is_err());
+        writer.publish_if_due(&status, start + Duration::from_secs(1));
+        assert_eq!(receiver.try_recv().unwrap().phase, "scanning");
+        // A full queue drops an update instead of holding the OCR loop.
+        writer.publish_if_due(&status, start + Duration::from_secs(2));
+        writer.publish_if_due(&status, start + Duration::from_secs(3));
+        assert_eq!(receiver.try_recv().unwrap().phase, "scanning");
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn snapshot_replaces_one_file_and_error_text_remains_private() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("mayhem-scan-test-{}-{suffix}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("scan-status.json");
+        let mut status = ScanStatus::new();
+        write_scan_snapshot(&path, &status).unwrap();
+        status.phase = "captureOcrError";
+        status.error = Some(safe_scan_error(&anyhow::anyhow!(
+            "PrivatePlayer#1234 and screenshot.png"
+        )));
+        write_scan_snapshot(&path, &status).unwrap();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&contents).unwrap();
+        assert_eq!(value["phase"], "captureOcrError");
+        assert_eq!(value["error"]["stage"], "captureOcr");
+        assert!(!contents.contains("PrivatePlayer"));
+        assert!(!contents.contains("screenshot.png"));
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
     }
 }

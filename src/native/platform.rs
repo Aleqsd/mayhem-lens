@@ -1,15 +1,16 @@
 use super::{Badge, Observation, Rect, UserAction};
 use anyhow::{Context, Result, bail, ensure};
+use serde::Serialize;
 use std::{
     cell::RefCell,
-    ptr,
+    fs, ptr,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
-        mpsc::{Receiver, Sender, TryRecvError},
+        mpsc::{self, Receiver, Sender, SyncSender, TryRecvError},
     },
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use windows::{
     Foundation::TimeSpan,
@@ -27,8 +28,9 @@ use windows::{
     Storage::Streams::Buffer,
     Win32::{
         Foundation::{
-            COLORREF, CloseHandle, ERROR_ALREADY_EXISTS, ERROR_INSUFFICIENT_BUFFER, GetLastError,
-            HANDLE, HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
+            COLORREF, CloseHandle, ERROR_ALREADY_EXISTS, ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS,
+            GetLastError, HANDLE, HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE,
+            WPARAM,
         },
         Graphics::{
             Direct2D::{
@@ -64,7 +66,9 @@ use windows::{
                 HBITMAP, HDC, HGDIOBJ, SelectObject,
             },
         },
-        Storage::Packaging::Appx::GetCurrentPackageFullName,
+        Storage::Packaging::Appx::{
+            GetCurrentPackageFamilyName, GetCurrentPackageFullName, PACKAGE_FAMILY_NAME_MAX_LENGTH,
+        },
         System::{
             LibraryLoader::GetModuleHandleW,
             Threading::CreateMutexW,
@@ -90,17 +94,17 @@ use windows::{
                 AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
                 DestroyWindow, DispatchMessageW, EnumWindows, GetClassNameW, GetCursorPos,
                 GetForegroundWindow, GetWindowRect, HMENU, IDI_INFORMATION, IsIconic,
-                IsWindowVisible, LoadIconW, MA_NOACTIVATE, MF_CHECKED, MF_SEPARATOR, MF_STRING,
-                MSG, PM_REMOVE, PeekMessageW, PostMessageW, RegisterClassW, SW_HIDE, SW_SHOW,
-                SW_SHOWNOACTIVATE, SetForegroundWindow, ShowWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-                TrackPopupMenu, TranslateMessage, ULW_ALPHA, UpdateLayeredWindow, WM_APP,
-                WM_CONTEXTMENU, WM_HOTKEY, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_NULL, WM_QUIT,
-                WM_RBUTTONUP, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-                WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+                IsWindowVisible, LoadIconW, MA_NOACTIVATE, MF_CHECKED, MF_GRAYED, MF_SEPARATOR,
+                MF_STRING, MSG, PM_REMOVE, PeekMessageW, PostMessageW, RegisterClassW, SW_HIDE,
+                SW_SHOW, SW_SHOWNOACTIVATE, SetForegroundWindow, ShowWindow, TPM_RETURNCMD,
+                TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, ULW_ALPHA, UpdateLayeredWindow,
+                WM_APP, WM_CONTEXTMENU, WM_HOTKEY, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_NULL,
+                WM_QUIT, WM_RBUTTONUP, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+                WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
             },
         },
     },
-    core::{BOOL, HSTRING, Interface, factory, w},
+    core::{BOOL, HSTRING, Interface, PWSTR, factory, w},
 };
 
 const HOTKEY_SCAN: i32 = 1;
@@ -116,6 +120,8 @@ const MENU_STAGE_1: u32 = 111;
 const MENU_STAGE_4: u32 = 114;
 const MENU_SETTINGS: u32 = 120;
 const MENU_QUIT: u32 = 121;
+const MENU_UPDATE: u32 = 122;
+const DISPLAY_STATUS_INTERVAL: Duration = Duration::from_secs(1);
 
 thread_local! {
     static CAPTURE_WORKER: RefCell<Option<CaptureWorker>> = const { RefCell::new(None) };
@@ -154,6 +160,40 @@ fn package_identity() -> bool {
     let mut length = 0;
     // SAFETY: null buffer requests the required length and never reads package data.
     unsafe { GetCurrentPackageFullName(&mut length, None) == ERROR_INSUFFICIENT_BUFFER }
+}
+
+/// Returns the package-owned persistent directory visible to host diagnostics.
+/// This uses only the process identity API: no COM, file access or directory creation.
+pub fn package_data_directory() -> Option<std::path::PathBuf> {
+    let mut length = 0;
+    // SAFETY: a null buffer asks Windows for the UTF-16 size including its NUL.
+    let required = unsafe { GetCurrentPackageFamilyName(&mut length, None) };
+    if required != ERROR_INSUFFICIENT_BUFFER
+        || length == 0
+        || length > PACKAGE_FAMILY_NAME_MAX_LENGTH + 1
+    {
+        return None;
+    }
+    let mut buffer = vec![0_u16; length as usize];
+    // SAFETY: the writable buffer contains exactly the number of UTF-16 units
+    // supplied to Windows, and it remains alive throughout this synchronous call.
+    let result =
+        unsafe { GetCurrentPackageFamilyName(&mut length, Some(PWSTR(buffer.as_mut_ptr()))) };
+    if result != ERROR_SUCCESS {
+        return None;
+    }
+    let end = buffer.iter().position(|value| *value == 0)?;
+    let family = String::from_utf16(&buffer[..end]).ok()?;
+    if family.is_empty() {
+        return None;
+    }
+    Some(
+        std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA")?)
+            .join("Packages")
+            .join(family)
+            .join("LocalState")
+            .join("MayhemLens"),
+    )
 }
 
 pub fn diagnostics() -> Result<String> {
@@ -897,10 +937,16 @@ impl Tray {
         actions: &Sender<UserAction>,
         stop: &AtomicBool,
         config_path: &std::path::Path,
+        updates: &crate::update::UpdateController,
     ) -> Result<()> {
         let menu = PopupMenu(unsafe { CreatePopupMenu() }?);
         let config = crate::config::Config::load(config_path)?;
         let english = config.language == "en";
+        let update_status = updates.status();
+        let update_ready = matches!(
+            update_status.phase,
+            crate::update::UpdatePhase::ReadyOnRestart | crate::update::UpdatePhase::Registered
+        );
         let scan = HSTRING::from(if english {
             "Scan when back in game  (Ctrl+Shift+M)"
         } else {
@@ -947,6 +993,27 @@ impl Tray {
             AppendMenuW(menu.0, MF_SEPARATOR, 0, None)?;
             AppendMenuW(
                 menu.0,
+                MF_STRING | MF_GRAYED,
+                0,
+                &HSTRING::from(update_status.summary(&config.language)),
+            )?;
+            AppendMenuW(
+                menu.0,
+                if update_status.busy() {
+                    MF_STRING | MF_GRAYED
+                } else {
+                    MF_STRING
+                },
+                MENU_UPDATE as usize,
+                &HSTRING::from(if english {
+                    "Check / prepare update"
+                } else {
+                    "Rechercher / préparer une mise à jour"
+                }),
+            )?;
+            AppendMenuW(menu.0, MF_SEPARATOR, 0, None)?;
+            AppendMenuW(
+                menu.0,
                 MF_STRING,
                 MENU_SETTINGS as usize,
                 &HSTRING::from(if english {
@@ -959,10 +1026,11 @@ impl Tray {
                 menu.0,
                 MF_STRING,
                 MENU_QUIT as usize,
-                &HSTRING::from(if english {
-                    "Quit  (Ctrl+Shift+Q)"
-                } else {
-                    "Quitter  (Ctrl+Shift+Q)"
+                &HSTRING::from(match (english, update_ready) {
+                    (true, true) => "Quit to apply update  (Ctrl+Shift+Q)",
+                    (false, true) => "Quitter pour appliquer la mise à jour  (Ctrl+Shift+Q)",
+                    (true, false) => "Quit  (Ctrl+Shift+Q)",
+                    (false, false) => "Quitter  (Ctrl+Shift+Q)",
                 }),
             )?;
         }
@@ -1005,6 +1073,22 @@ impl Tray {
                     "Impossible d'ouvrir la configuration ({})",
                     result.0 as isize
                 );
+            }
+            MENU_UPDATE => {
+                if update_status.phase == crate::update::UpdatePhase::Unsupported {
+                    // Older Windows builds cannot defer an AppInstaller URI. This
+                    // fallback opens HTTPS only after the explicit menu action.
+                    let url = HSTRING::from(crate::update::APPINSTALLER_URL);
+                    let result = unsafe {
+                        ShellExecuteW(Some(self.owner.0), w!("open"), &url, None, None, SW_SHOW)
+                    };
+                    ensure!(
+                        result.0 as isize > 32,
+                        "Impossible d'ouvrir le canal de mise à jour"
+                    );
+                } else {
+                    let _ = updates.request_update();
+                }
             }
             MENU_QUIT => stop.store(true, Ordering::Release),
             _ => {}
@@ -1233,11 +1317,193 @@ impl BadgeRenderer {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum DisplayReason {
+    Visible,
+    NoBadges,
+    GameUnavailable,
+    HiddenForeground,
+    GeometryUnavailable,
+    GeometryChanged,
+    TtlExpired,
+    Stopped,
+}
+
+#[derive(Clone, Copy)]
+struct DisplayContext {
+    stopped: bool,
+    game_visible: bool,
+    game_foreground: bool,
+    game_geometry: Option<Rect>,
+    published_geometry: Option<Rect>,
+    badge_count: usize,
+    fresh: bool,
+}
+impl DisplayContext {
+    fn reason(&self) -> DisplayReason {
+        if self.stopped {
+            DisplayReason::Stopped
+        } else if !self.game_visible {
+            DisplayReason::GameUnavailable
+        } else if !self.game_foreground {
+            DisplayReason::HiddenForeground
+        } else if self.game_geometry.is_none() {
+            DisplayReason::GeometryUnavailable
+        } else if self.badge_count == 0 {
+            DisplayReason::NoBadges
+        } else if !self.fresh {
+            DisplayReason::TtlExpired
+        } else if self.game_geometry != self.published_geometry {
+            DisplayReason::GeometryChanged
+        } else {
+            DisplayReason::Visible
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct DisplayRect {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+}
+impl From<Rect> for DisplayRect {
+    fn from(rect: Rect) -> Self {
+        Self {
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DisplayStatus {
+    timestamp_unix_ms: u64,
+    process_id: u32,
+    game_visible: bool,
+    game_foreground: bool,
+    window_count: usize,
+    badges_requested_count: usize,
+    visible_window_count: usize,
+    visible_windows: Vec<DisplayRect>,
+    game_bounds: Option<DisplayRect>,
+    published_game_bounds: Option<DisplayRect>,
+    display_reason: DisplayReason,
+    last_badges_age_ms: Option<u64>,
+    freshness_ttl_ms: u64,
+}
+
+/// Observations concern our owned HWNDs, not players, captures or recognized text.
+/// The disk stays off the render thread, with one bounded pending snapshot.
+struct DisplayPublisher {
+    sender: SyncSender<DisplayStatus>,
+    last_snapshot: Option<Instant>,
+}
+impl DisplayPublisher {
+    fn new() -> Result<Self> {
+        let (sender, receiver) = mpsc::sync_channel::<DisplayStatus>(1);
+        thread::Builder::new()
+            .name("mayhem-display-status".into())
+            .spawn(move || {
+                let mut last_write: Option<Instant> = None;
+                let mut failed = false;
+                while let Ok(status) = receiver.recv() {
+                    if let Some(previous) = last_write {
+                        thread::sleep(DISPLAY_STATUS_INTERVAL.saturating_sub(previous.elapsed()));
+                    }
+                    let result = persist_display_status(&status);
+                    last_write = Some(Instant::now());
+                    match result {
+                        Ok(()) => failed = false,
+                        Err(error) if !failed => {
+                            eprintln!("État affichage : {error:#}");
+                            failed = true;
+                        }
+                        Err(_) => {}
+                    }
+                }
+            })
+            .context("Création du worker d'état affichage")?;
+        Ok(Self {
+            sender,
+            last_snapshot: None,
+        })
+    }
+
+    fn due(&self) -> bool {
+        self.last_snapshot
+            .is_none_or(|previous| previous.elapsed() >= DISPLAY_STATUS_INTERVAL)
+    }
+
+    fn publish(&mut self, status: DisplayStatus) {
+        self.last_snapshot = Some(Instant::now());
+        // A slow disk can skip a snapshot; it must never stall the overlay.
+        let _ = self.sender.try_send(status);
+    }
+}
+
+fn persist_display_status(status: &DisplayStatus) -> Result<()> {
+    let directory = crate::config::app_directory();
+    fs::create_dir_all(&directory)?;
+    let path = directory.join("display-status.json");
+    let temporary = directory.join("display-status.json.tmp");
+    fs::write(&temporary, serde_json::to_vec_pretty(status)?)?;
+    fs::rename(temporary, path).context("Enregistrement atomique de l'état affichage")
+}
+
+fn duration_ms(duration: Duration) -> u64 {
+    duration.as_millis().try_into().unwrap_or(u64::MAX)
+}
+
+fn display_status(
+    windows: &[BadgeWindow],
+    context: &DisplayContext,
+    last_received: Option<Instant>,
+    scan_interval_ms: u64,
+) -> DisplayStatus {
+    // SAFETY: every queried HWND is owned by this display thread and remains
+    // alive throughout the snapshot. This checks the native WS_VISIBLE state;
+    // it is not a screenshot or proof that other windows cannot occlude pixels.
+    let visible: Vec<_> = windows
+        .iter()
+        .filter(|window| unsafe { IsWindowVisible(window.0) }.as_bool())
+        .collect();
+    let visible_windows = visible
+        .iter()
+        .filter_map(|window| window_bounds(window.0).ok().map(DisplayRect::from))
+        .collect();
+    DisplayStatus {
+        timestamp_unix_ms: duration_ms(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default(),
+        ),
+        process_id: std::process::id(),
+        game_visible: context.game_visible,
+        game_foreground: context.game_foreground,
+        window_count: windows.len(),
+        badges_requested_count: context.badge_count,
+        visible_window_count: visible.len(),
+        visible_windows,
+        game_bounds: context.game_geometry.map(DisplayRect::from),
+        published_game_bounds: context.published_geometry.map(DisplayRect::from),
+        display_reason: context.reason(),
+        last_badges_age_ms: last_received.map(|received| duration_ms(received.elapsed())),
+        freshness_ttl_ms: scan_interval_ms.saturating_add(1_500),
+    }
+}
+
 pub fn run_overlay(
     receiver: Receiver<Vec<Badge>>,
     actions: Sender<UserAction>,
     stop: Arc<AtomicBool>,
     config_path: &std::path::Path,
+    updates: crate::update::UpdateController,
 ) -> Result<()> {
     let mut scan_interval_ms = crate::config::Config::load(config_path)?.scan_interval_ms;
     let mut settings_read = Instant::now();
@@ -1255,6 +1521,14 @@ pub fn run_overlay(
     ensure!(atom != 0, "Impossible d'enregistrer la fenêtre overlay");
     let tray = Tray::new(instance)?;
     let renderer = BadgeRenderer::new()?;
+    let mut display = match DisplayPublisher::new() {
+        Ok(display) => Some(display),
+        Err(error) => {
+            // Diagnostics are optional and must not prevent rendering.
+            eprintln!("État affichage indisponible : {error:#}");
+            None
+        }
+    };
     let mut windows = Vec::<BadgeWindow>::new();
     let mut current = Vec::<Badge>::new();
     let mut published_geometry = None;
@@ -1280,7 +1554,7 @@ pub fn run_overlay(
                     let _ = unsafe { ShowWindow(window.0, SW_HIDE) };
                 }
                 showing = false;
-                if let Err(error) = tray.show_menu(&actions, &stop, config_path) {
+                if let Err(error) = tray.show_menu(&actions, &stop, config_path, &updates) {
                     eprintln!("Menu Mayhem Lens : {error:#}");
                 }
             } else if message.message == WM_HOTKEY {
@@ -1319,14 +1593,19 @@ pub fn run_overlay(
                 }
             }
         }
-        let geometry = game_window()
-            .filter(|hwnd| unsafe { GetForegroundWindow() == *hwnd })
-            .and_then(|hwnd| window_bounds(hwnd).ok());
-        let should_show = !current.is_empty()
-            && badges_fresh(Instant::now(), last_received, scan_interval_ms)
-            && geometry.is_some()
-            && geometry == published_geometry
-            && !stop.load(Ordering::Acquire);
+        let game = game_window();
+        let game_foreground = game.is_some_and(|hwnd| unsafe { GetForegroundWindow() == hwnd });
+        let game_geometry = game.and_then(|hwnd| window_bounds(hwnd).ok());
+        let context = DisplayContext {
+            stopped: stop.load(Ordering::Acquire),
+            game_visible: game.is_some(),
+            game_foreground,
+            game_geometry,
+            published_geometry,
+            badge_count: current.len(),
+            fresh: badges_fresh(Instant::now(), last_received, scan_interval_ms),
+        };
+        let should_show = context.reason() == DisplayReason::Visible;
         if !should_show {
             if showing {
                 for window in &windows {
@@ -1340,7 +1619,7 @@ pub fn run_overlay(
                 for badge in &current {
                     let rect = safe_badge_bounds(
                         badge.rect,
-                        geometry.context("Géométrie du jeu absente")?,
+                        game_geometry.context("Géométrie du jeu absente")?,
                     );
                     // SAFETY: owns a passive top-level HWND, never the game HWND.
                     let hwnd = unsafe {
@@ -1377,6 +1656,16 @@ pub fn run_overlay(
             }
             showing = true;
         }
+        if let Some(display) = &mut display
+            && display.due()
+        {
+            display.publish(display_status(
+                &windows,
+                &context,
+                last_received,
+                scan_interval_ms,
+            ));
+        }
         thread::sleep(Duration::from_millis(25));
     }
     // HWNDs and hotkeys drop on their owning thread even when an error unwinds.
@@ -1404,6 +1693,81 @@ fn safe_badge_bounds(rect: Rect, game: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_visibility_rejects_stale_background_and_moved_game_geometry() {
+        let game = Rect {
+            x: -2_560,
+            y: 0,
+            width: 2_560,
+            height: 1_440,
+        };
+        let ready = DisplayContext {
+            stopped: false,
+            game_visible: true,
+            game_foreground: true,
+            game_geometry: Some(game),
+            published_geometry: Some(game),
+            badge_count: 3,
+            fresh: true,
+        };
+        assert_eq!(ready.reason(), DisplayReason::Visible);
+        let hidden = [
+            (
+                DisplayContext {
+                    stopped: true,
+                    ..ready
+                },
+                DisplayReason::Stopped,
+            ),
+            (
+                DisplayContext {
+                    game_visible: false,
+                    ..ready
+                },
+                DisplayReason::GameUnavailable,
+            ),
+            (
+                DisplayContext {
+                    game_foreground: false,
+                    ..ready
+                },
+                DisplayReason::HiddenForeground,
+            ),
+            (
+                DisplayContext {
+                    game_geometry: None,
+                    ..ready
+                },
+                DisplayReason::GeometryUnavailable,
+            ),
+            (
+                DisplayContext {
+                    badge_count: 0,
+                    ..ready
+                },
+                DisplayReason::NoBadges,
+            ),
+            (
+                DisplayContext {
+                    fresh: false,
+                    ..ready
+                },
+                DisplayReason::TtlExpired,
+            ),
+            (
+                DisplayContext {
+                    published_geometry: Some(Rect { x: 0, ..game }),
+                    ..ready
+                },
+                DisplayReason::GeometryChanged,
+            ),
+        ];
+        for (context, reason) in hidden {
+            assert_eq!(context.reason(), reason);
+            assert_ne!(context.reason(), DisplayReason::Visible);
+        }
+    }
 
     #[test]
     fn stalled_ocr_expires_badges_at_the_configured_scan_budget() {

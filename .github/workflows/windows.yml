@@ -23,4 +23,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: MayhemLens-Windows-unsigned
-          path: dist/MayhemLens_0.1.0.0_x64.msix
+          path: |
+            dist/*.msix
+            dist/MayhemLens.appinstaller

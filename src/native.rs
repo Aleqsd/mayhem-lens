@@ -45,7 +45,7 @@ mod platform;
 #[cfg(windows)]
 pub use platform::{
     InstanceGuard, acquire_single_instance, diagnostics, ensure_ready, game_window_visible,
-    invalidate_observations, observe_game,
+    invalidate_observations, observe_game, package_data_directory,
 };
 
 #[cfg(windows)]
@@ -54,8 +54,14 @@ pub fn run_overlay(
     actions: Sender<UserAction>,
     stop: Arc<AtomicBool>,
     config_path: &std::path::Path,
+    updates: crate::update::UpdateController,
 ) -> anyhow::Result<()> {
-    platform::run_overlay(receiver, actions, stop, config_path)
+    platform::run_overlay(receiver, actions, stop, config_path, updates)
+}
+
+#[cfg(not(windows))]
+pub fn package_data_directory() -> Option<std::path::PathBuf> {
+    None
 }
 
 #[cfg(not(windows))]
@@ -95,6 +101,7 @@ pub fn run_overlay(
     _: Sender<UserAction>,
     _: Arc<AtomicBool>,
     _: &std::path::Path,
+    _: crate::update::UpdateController,
 ) -> anyhow::Result<()> {
     anyhow::bail!("L'overlay natif nécessite Windows.")
 }

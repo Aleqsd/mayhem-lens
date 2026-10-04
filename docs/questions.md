@@ -2,7 +2,7 @@
 
 Statut : questions présentées à l'utilisateur. Les réponses reçues sont indiquées explicitement ; une proposition seule n'est pas une réponse acceptée.
 
-1. **Public cible** — Usage personnel, quelques amis ou diffusion publique à terme ? **Réponse : pour l'utilisateur et quelques amis.** Dépôt privé au démarrage.
+1. **Public cible** — Usage personnel, quelques amis ou diffusion publique à terme ? **Réponse : pour l'utilisateur et quelques amis.** Précision ultérieure du 4 octobre : code et installateur publics.
 2. **Périmètre v1** — Tiers des trois cartes seulement, combos entre augmentations, ou aussi objets/builds ? **Réponse : ajouter des conseils d'objets et de builds dès la v1.**
 3. **Affichage** — Lettre S/A/B/C discrète, lettre et explication, ou panneau comparatif ? **Réponse : la lettre et une courte explication.**
 4. **Déclenchement** — Automatique avec raccourci de secours, raccourci seul, ou automatique après activation pour la partie ? **Réponse : automatiquement, avec un raccourci de secours.**

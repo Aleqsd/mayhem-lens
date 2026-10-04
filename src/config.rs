@@ -86,6 +86,10 @@ impl Config {
 }
 
 pub fn app_directory() -> PathBuf {
+    #[cfg(windows)]
+    if let Some(directory) = crate::native::package_data_directory() {
+        return directory;
+    }
     std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir)

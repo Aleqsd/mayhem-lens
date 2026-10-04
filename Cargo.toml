@@ -1,6 +1,6 @@
 [package]
 name = "mayhem-lens"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 publish = false
 description = "Overlay Windows de tiers d'augmentations ARAM Mayhem"
@@ -14,7 +14,8 @@ unicode-normalization = "0.1"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = [
-  "Foundation", "Globalization", "Media_Ocr", "Graphics_Imaging", "Graphics_Capture",
+  "Foundation", "ApplicationModel", "Management_Deployment", "System_Profile",
+  "Globalization", "Media_Ocr", "Graphics_Imaging", "Graphics_Capture",
   "Graphics_DirectX", "Graphics_DirectX_Direct3D11", "Storage_Streams",
   "Win32_Foundation", "Win32_System_Com", "Win32_System_WinRT",
   "Win32_System_WinRT_Graphics_Capture", "Win32_System_WinRT_Direct3D11",
